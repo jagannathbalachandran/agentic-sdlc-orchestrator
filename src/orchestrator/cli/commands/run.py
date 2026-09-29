@@ -1,9 +1,10 @@
 """`orchestrator run` command: start (or, given --run-id, continue) a run.
 
-T2.3 scope: --mock only (the real executor is T4); advances exactly one pending
-stage per invocation (see engine/fsm.py's module docstring for why). --run-id is
-primarily an internal/testing affordance right now — it's the same primitive
-T3.1's approve/reject/answer commands will reuse to resume a paused run.
+T2.3/T3.1 scope: --mock only (the real executor is T4); advances pending stages
+until it hits a checkpoint, a terminal state, or the graph is exhausted (see
+engine/fsm.py's module docstring). --run-id is primarily an internal/testing
+affordance right now — it's the same primitive approve/reject/answer reuse to
+resume a paused run.
 """
 
 from __future__ import annotations
@@ -13,14 +14,15 @@ import sys
 from datetime import UTC, datetime
 from pathlib import Path
 
-from orchestrator.config.loader import load_defaults_config
+from orchestrator.cli.commands._common import (
+    FIXTURES_ROOT,
+    describe,
+    max_run_duration_seconds,
+)
 from orchestrator.engine.fsm import DriveRequest, drive, generate_run_id
 from orchestrator.executors.mock import MockExecutor
 
 COMMAND_NAME = "run"
-DEFAULTS_CONFIG_PATH = Path("config/defaults.toml")
-FIXTURES_ROOT = Path("fixtures/mock")
-SECONDS_PER_MINUTE = 60
 
 
 def add_subparser(
@@ -48,7 +50,6 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
         print("real executor not available yet (T4) - pass --mock", file=sys.stderr)
         return 2
 
-    defaults = load_defaults_config(DEFAULTS_CONFIG_PATH)
     run_id = args.run_id or generate_run_id(
         orch_home, args.project, args.scenario_id, datetime.now(UTC).date()
     )
@@ -60,12 +61,16 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
             scenario_id=args.scenario_id,
         ),
         executor=MockExecutor(FIXTURES_ROOT),
-        max_run_duration_seconds=defaults.limits.max_run_duration_minutes
-        * SECONDS_PER_MINUTE,
+        max_run_duration_seconds=max_run_duration_seconds(),
     )
-    if result.ran_stage is None:
+    if result.ran_stage is not None:
+        print(f"run {run_id}: ran {result.ran_stage.value}")
+    elif (
+        result.graph_state.pending_checkpoint is None
+        and result.graph_state.terminal_state is None
+    ):
         print(f"run {run_id}: nothing to do (graph exhausted or no ready stage)")
     else:
-        print(f"run {run_id}: ran {result.ran_stage.value}")
+        print(describe(result.graph_state))
     print(f"run-id={run_id}")
     return 0

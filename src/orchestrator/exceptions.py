@@ -50,3 +50,20 @@ class ProjectLockedError(OrchestratorError):
         super().__init__(f"project {project_name!r} is locked by pid {holder_pid}")
         self.project_name = project_name
         self.holder_pid = holder_pid
+
+
+class NoPendingApprovalError(OrchestratorError):
+    """approve/reject/answer was called but the run has no pending checkpoint."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id!r} has no pending approval checkpoint")
+        self.run_id = run_id
+
+
+class RunAlreadyTerminalError(OrchestratorError):
+    """The run has already reached a terminal state (completed/failed/rejected/stopped)."""
+
+    def __init__(self, run_id: str, terminal_state: str) -> None:
+        super().__init__(f"run {run_id!r} is already {terminal_state}")
+        self.run_id = run_id
+        self.terminal_state = terminal_state

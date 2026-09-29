@@ -1,14 +1,18 @@
-"""engine.fsm.drive(): the shared entry point every run-touching CLI command
-re-enters, rebuilding all state from disk each time (architecture-proposal.md
-§3.2.1) — there is no long-running orchestrator process.
+"""engine.fsm: the shared entry points every run-touching CLI command re-enters,
+rebuilding all state from disk each time (architecture-proposal.md §3.2.1) —
+there is no long-running orchestrator process.
 
-T2.3 scope: processes exactly one pending stage per call. GRAPH only has S0/S1
-and no approval-checkpoint logic exists yet (T3.1/T3.2 replace this "one stage
-per call" rule with "keep going until a checkpoint or the graph is exhausted").
-Real run.json creation (C1-AC2's "record") is also deferred — it needs registry
-lookups, config-hash computation, and real workspace/branch data that isn't all
-wired together until T3.2; writing a placeholder-filled run.json now would just
-have to be redone.
+`drive()` advances a run: it runs pending stages until it hits a stage whose
+`checkpoint_after` is set (pausing at `awaiting_approval`), the run reaches a
+terminal state, or the graph is exhausted. `resolve_checkpoint()` and `stop_run()`
+are the other half `approve`/`reject`/`answer`/`stop` call before (for approve/
+reject-without-`--final`/answer) re-entering `drive()` to continue — they take
+just a `RunRef` (no `scenario_id`), since by the time a checkpoint exists the
+run's `scenario_id` is already persisted in graph.json.
+
+Real run.json creation (C1-AC2's "record") is still deferred — it needs registry
+lookups, config-hash computation, and real workspace/branch data not all wired
+together until T3.2.
 """
 
 from __future__ import annotations
@@ -17,12 +21,16 @@ from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from orchestrator.audit.approvals_log import append_approval
 from orchestrator.audit.event_log import EventLog
 from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
 from orchestrator.engine.runner import StageRunner, StageRunRequest
+from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
 from orchestrator.executors.base import Executor
+from orchestrator.models.approvals import ApprovalDecision, ApprovalRecord
+from orchestrator.models.events import EventDraft, EventType
 from orchestrator.models.graph import (
     GraphState,
     StageId,
@@ -30,11 +38,45 @@ from orchestrator.models.graph import (
     StageSpec,
     StageStatus,
 )
+from orchestrator.models.run import RunState
 
 GRAPH_STATE_FILENAME = "graph.json"
 EVENTS_FILENAME = "events.jsonl"
+APPROVALS_FILENAME = "approvals.jsonl"
 DEFAULT_STAGE_TIMEOUT_SECONDS = 600
 DEFAULT_STAGE_BUDGET_USD = 0.5
+
+
+@dataclass(frozen=True)
+class RunRef:
+    """Identifies one run, without its scenario_id (already persisted once started)."""
+
+    orch_home: Path
+    project: str
+    run_id: str
+
+
+@dataclass(frozen=True)
+class DriveRequest:
+    """Which run to advance, and (for a brand-new run) its scenario_id."""
+
+    orch_home: Path
+    project: str
+    run_id: str
+    scenario_id: str
+
+    @property
+    def ref(self) -> RunRef:
+        """This request's run, without the scenario_id."""
+        return RunRef(self.orch_home, self.project, self.run_id)
+
+
+@dataclass(frozen=True)
+class DriveResult:
+    """What one drive() call accomplished."""
+
+    ran_stage: StageId | None
+    graph_state: GraphState
 
 
 def run_dir(orch_home: Path, project: str, run_id: str) -> Path:
@@ -63,24 +105,6 @@ def generate_run_id(
     return f"{prefix}{next_seq:03d}"
 
 
-@dataclass(frozen=True)
-class DriveRequest:
-    """Which run to advance, and where its state lives."""
-
-    orch_home: Path
-    project: str
-    run_id: str
-    scenario_id: str
-
-
-@dataclass(frozen=True)
-class DriveResult:
-    """What one drive() call accomplished."""
-
-    ran_stage: StageId | None
-    graph_state: GraphState
-
-
 def _next_pending_stage(graph_state: GraphState) -> StageSpec | None:
     for stage_id, spec in GRAPH.items():
         result = graph_state.stages.get(stage_id)
@@ -95,35 +119,45 @@ def _next_pending_stage(graph_state: GraphState) -> StageSpec | None:
     return None
 
 
-def _load_or_init_graph_state(state_path: Path, run_id: str) -> GraphState:
+def _state_path(ref: RunRef) -> Path:
+    return run_dir(ref.orch_home, ref.project, ref.run_id) / GRAPH_STATE_FILENAME
+
+
+def _load_or_init_graph_state(request: DriveRequest) -> GraphState:
+    state_path = _state_path(request.ref)
     if state_path.is_file():
         return read_json(state_path, GraphState)
-    return GraphState(run_id=run_id)
+    return GraphState(run_id=request.run_id, scenario_id=request.scenario_id)
+
+
+def _load_existing_graph_state(ref: RunRef) -> GraphState:
+    """Load state for a run that must already exist (resolve_checkpoint/stop_run)."""
+    return read_json(_state_path(ref), GraphState)
 
 
 def drive(
     request: DriveRequest, executor: Executor, max_run_duration_seconds: float
 ) -> DriveResult:
-    """Reload state from disk, run the next pending stage (if any), persist, return."""
-    acquire_lock(
-        request.orch_home, request.project, request.run_id, max_run_duration_seconds
-    )
+    """Reload state from disk; run the next pending stage unless paused or done."""
+    ref = request.ref
+    acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
     try:
-        state_path = (
-            run_dir(request.orch_home, request.project, request.run_id)
-            / GRAPH_STATE_FILENAME
-        )
-        graph_state = _load_or_init_graph_state(state_path, request.run_id)
+        graph_state = _load_or_init_graph_state(request)
+
+        if (
+            graph_state.terminal_state is not None
+            or graph_state.pending_checkpoint is not None
+        ):
+            return DriveResult(ran_stage=None, graph_state=graph_state)
 
         spec = _next_pending_stage(graph_state)
         if spec is None:
             return DriveResult(ran_stage=None, graph_state=graph_state)
 
-        workspace = workspace_dir(request.orch_home, request.project, request.run_id)
+        workspace = workspace_dir(ref.orch_home, ref.project, ref.run_id)
         workspace.mkdir(parents=True, exist_ok=True)
         event_log = EventLog(
-            run_dir(request.orch_home, request.project, request.run_id)
-            / EVENTS_FILENAME
+            run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
         )
         runner = StageRunner(
             executor=executor, event_log=event_log, clock=lambda: datetime.now(UTC)
@@ -132,8 +166,8 @@ def drive(
         result = runner.run(
             StageRunRequest(
                 spec=spec,
-                run_id=request.run_id,
-                scenario_id=request.scenario_id,
+                run_id=ref.run_id,
+                scenario_id=graph_state.scenario_id,
                 workspace_path=workspace,
                 rendered_prompt=f"stage {spec.stage_id.value}",
                 timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
@@ -147,7 +181,100 @@ def drive(
             attempts=1,
             commits=(result.commit,) if result.commit else (),
         )
-        atomic_write_json(state_path, graph_state)
+        if result.status is StageStatus.PASSED and spec.checkpoint_after is not None:
+            graph_state.pending_checkpoint = spec.checkpoint_after
+            event_log.append(
+                EventDraft(
+                    run_id=ref.run_id,
+                    event_type=EventType.APPROVAL_REQUESTED,
+                    recorded_at=datetime.now(UTC),
+                    stage=spec.stage_id.value,
+                    payload={"checkpoint": spec.checkpoint_after.value},
+                )
+            )
+        atomic_write_json(_state_path(ref), graph_state)
         return DriveResult(ran_stage=spec.stage_id, graph_state=graph_state)
     finally:
-        release_lock(request.orch_home, request.project)
+        release_lock(ref.orch_home, ref.project)
+
+
+def resolve_checkpoint(
+    ref: RunRef,
+    decision: ApprovalDecision,
+    comment: str,
+    approver: str,
+    max_run_duration_seconds: float,
+) -> GraphState:
+    """Record an approve/reject/answer decision and clear the pending checkpoint.
+
+    Raises NoPendingApprovalError if the run isn't actually paused. `reject` with
+    ApprovalDecision.REJECT_FINAL ends the run as `rejected` (D-14); every other
+    decision just clears the checkpoint so a later drive() call continues — real
+    rejection-driven re-planning (feedback -> re-run S3+) is T7.2's job, not this
+    task's; `comment` is still faithfully recorded either way (C7-AC2/AC3).
+    """
+    acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
+    try:
+        graph_state = _load_existing_graph_state(ref)
+        if graph_state.pending_checkpoint is None:
+            raise NoPendingApprovalError(ref.run_id)
+
+        checkpoint = graph_state.pending_checkpoint
+        now = datetime.now(UTC)
+        append_approval(
+            run_dir(ref.orch_home, ref.project, ref.run_id) / APPROVALS_FILENAME,
+            ApprovalRecord(
+                checkpoint=checkpoint,
+                artifact_hashes=(),
+                decision=decision,
+                comment=comment,
+                approver=approver,
+                decided_at=now,
+            ),
+        )
+        event_log = EventLog(
+            run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
+        )
+        event_log.append(
+            EventDraft(
+                run_id=ref.run_id,
+                event_type=EventType.APPROVAL_RECORDED,
+                recorded_at=now,
+                payload={"checkpoint": checkpoint.value, "decision": decision.value},
+            )
+        )
+
+        graph_state.pending_checkpoint = None
+        if decision is ApprovalDecision.REJECT_FINAL:
+            graph_state.terminal_state = RunState.REJECTED
+        atomic_write_json(_state_path(ref), graph_state)
+        return graph_state
+    finally:
+        release_lock(ref.orch_home, ref.project)
+
+
+def stop_run(ref: RunRef, reason: str, max_run_duration_seconds: float) -> GraphState:
+    """Halt the run for safety/control regardless of the work (D-14)."""
+    acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
+    try:
+        graph_state = _load_existing_graph_state(ref)
+        if graph_state.terminal_state is not None:
+            raise RunAlreadyTerminalError(ref.run_id, graph_state.terminal_state.value)
+
+        event_log = EventLog(
+            run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
+        )
+        event_log.append(
+            EventDraft(
+                run_id=ref.run_id,
+                event_type=EventType.STOP,
+                recorded_at=datetime.now(UTC),
+                payload={"reason": reason},
+            )
+        )
+        graph_state.pending_checkpoint = None
+        graph_state.terminal_state = RunState.STOPPED
+        atomic_write_json(_state_path(ref), graph_state)
+        return graph_state
+    finally:
+        release_lock(ref.orch_home, ref.project)

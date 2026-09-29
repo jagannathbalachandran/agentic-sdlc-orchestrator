@@ -11,6 +11,9 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field
 
+from orchestrator.models.approvals import ApprovalCheckpointKind
+from orchestrator.models.run import RunState
+
 
 class StageId(StrEnum):
     """The fixed Phase 1 stage graph (requirements.md §7)."""
@@ -55,6 +58,7 @@ class StageSpec(BaseModel):
     depends_on: tuple[StageId, ...] = ()
     allowed_write_paths: tuple[str, ...] = ()
     commit_strategy: CommitStrategy = CommitStrategy.NONE
+    checkpoint_after: ApprovalCheckpointKind | None = None
 
 
 class GateOutcome(BaseModel):
@@ -78,7 +82,15 @@ class StageResult(BaseModel):
 
 
 class GraphState(BaseModel):
-    """graph.json: per-stage status for one run."""
+    """graph.json: per-stage status for one run, plus its checkpoint/terminal state.
+
+    `scenario_id` is persisted here (not just passed around in memory) so
+    approve/reject/answer/stop — invoked with just a run_id — can recover it to
+    re-enter drive() without the caller having to re-supply it.
+    """
 
     run_id: str
+    scenario_id: str
     stages: dict[StageId, StageResult] = Field(default_factory=dict)
+    pending_checkpoint: ApprovalCheckpointKind | None = None
+    terminal_state: RunState | None = None

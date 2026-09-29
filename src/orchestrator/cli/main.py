@@ -5,13 +5,24 @@ from __future__ import annotations
 import argparse
 import os
 import sys
+from collections.abc import Callable
 from pathlib import Path
 
-from orchestrator.cli.commands import register, run, validate
+from orchestrator.cli.commands import (
+    answer,
+    approve,
+    register,
+    reject,
+    run,
+    stop,
+    validate,
+)
 from orchestrator.registry import resolve_project
 
 ORCH_HOME_ENV_VAR = "ORCH_HOME"
 DEFAULT_ORCH_HOME_DIRNAME = ".orchestrator"
+
+CommandHandler = Callable[[argparse.Namespace, Path], int]
 
 
 def default_orch_home() -> Path:
@@ -31,10 +42,27 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override ORCH_HOME (default: ~/.orchestrator or $ORCH_HOME)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    register.add_subparser(subparsers)
-    validate.add_subparser(subparsers)
-    run.add_subparser(subparsers)
+    for module in (register, validate, run, approve, reject, answer, stop):
+        module.add_subparser(subparsers)
     return parser
+
+
+def _validate_handler(args: argparse.Namespace, orch_home: Path) -> int:
+    return validate.handle(
+        args, lookup_project=lambda name: resolve_project(orch_home, name)
+    )
+
+
+def _handlers() -> dict[str, CommandHandler]:
+    return {
+        register.COMMAND_NAME: register.handle,
+        validate.COMMAND_NAME: _validate_handler,
+        run.COMMAND_NAME: run.handle,
+        approve.COMMAND_NAME: approve.handle,
+        reject.COMMAND_NAME: reject.handle,
+        answer.COMMAND_NAME: answer.handle,
+        stop.COMMAND_NAME: stop.handle,
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -43,15 +71,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     orch_home = Path(args.orch_home) if args.orch_home else default_orch_home()
 
-    if args.command == register.COMMAND_NAME:
-        return register.handle(args, orch_home)
-    if args.command == validate.COMMAND_NAME:
-        return validate.handle(
-            args, lookup_project=lambda name: resolve_project(orch_home, name)
-        )
-    if args.command == run.COMMAND_NAME:
-        return run.handle(args, orch_home)
-    parser.error(f"unknown command: {args.command}")
+    handler = _handlers().get(args.command)
+    if handler is None:
+        parser.error(f"unknown command: {args.command}")
+    return handler(args, orch_home)
 
 
 if __name__ == "__main__":

@@ -255,3 +255,52 @@ has a passing integration test behind it, not just a design doc.
   it runs on the mock executor's generic fixture today. T3.2 connects the real
   workspace manager and gate logic to the graph.
 
+## T3.1 — Approval checkpoints
+
+**What changed:** `models/graph.py` gained `StageSpec.checkpoint_after`
+(`ApprovalCheckpointKind | None`) and `GraphState.{scenario_id, pending_checkpoint,
+terminal_state}` — `scenario_id` is persisted so `approve`/`reject`/`answer`/`stop`
+(invoked with just a run-id) can recover it without the caller re-supplying it.
+`audit/approvals_log.py` (append-only `approvals.jsonl`, C7-AC3). `engine/fsm.py`
+restructured: `drive()` now pauses when a passed stage's `checkpoint_after` is set
+(emits `APPROVAL_REQUESTED`) and no-ops if the run is already paused or terminal;
+new `resolve_checkpoint()` (records the decision + comment, clears the pause,
+`REJECT_FINAL` → `terminal_state = REJECTED`) and `stop_run()` (→
+`terminal_state = STOPPED`) — both take the new `RunRef` (no `scenario_id` needed)
+rather than the full `DriveRequest`. `exceptions.py` gained
+`NoPendingApprovalError`, `RunAlreadyTerminalError`.
+`cli/commands/{approve,reject,answer,stop}.py` (+ a small `_common.py` for the
+config/mock-fixtures constants and a one-line status `describe()` shared across
+every run-touching command), wired into `cli/main.py` via a dispatch dict (kept
+the `if`-chain from growing to 7 branches). 25 new tests. 96.92% overall coverage.
+
+**Covered:** C7-AC1 (pause persists, resumes in a later command — proven the same
+way T2.3 proved general reload: a fresh `drive()` call after `resolve_checkpoint()`
+continues the graph); C7-AC2 (reject requires a comment — `--comment` is a required
+CLI arg on `reject`/`answer`; non-final reject clears the pause without ending the
+run, real re-planning is T7.2); C7-AC3 (every resolution recorded: checkpoint,
+decision, comment, approver, timestamp — `ApprovalRecord`, already fully specified
+by T1.1's model); C1 (`approve`/`reject`/`answer`/`stop` all exist and work).
+Lock staleness recovery itself (the rest of "closes G-1/G-2") was already built
+and tested in T2.2/T2.3 — not re-tested here, just relied on.
+
+**Deferred / assumed:**
+- **No real checkpoint is wired into the production `GRAPH` yet** — S0/S1 still
+  have `checkpoint_after=None`. Every checkpoint test (fsm and CLI) monkeypatches
+  `orchestrator.engine.fsm.GRAPH` with a small stub graph that does set one, per
+  the task's own "stub checkpoint" framing. T3.2 wires real Design/Change-control/
+  Release checkpoints into the full S0-S8 graph; at that point the integration
+  test could be extended to prove a checkpoint pause through the real `orchestrator
+  run` CLI end to end, not just through `drive()`/the command handlers directly.
+- **`answer` behaves identically to `approve` mechanically** (decision=`ANSWER`
+  instead of `APPROVE`, clears the pause, continues `drive()`). The real product
+  difference — a Clarification answer re-running S1 with the answer incorporated,
+  rather than just continuing to the next stage — is real S1/graph-wiring logic
+  that doesn't exist yet; recording the right decision type today is what T3.1's
+  scope asked for.
+- **`resolve_checkpoint()` and `drive()` each acquire/release the lock
+  separately**, not as one held section — a small window between "resolve" and
+  "continue" (both within the same CLI process) where another process could
+  theoretically acquire the lock. Not a concern at this build stage; flagged here
+  rather than silently accepted.
+
