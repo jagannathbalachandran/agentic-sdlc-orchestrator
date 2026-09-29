@@ -767,6 +767,20 @@ gap, and belongs in the engineering summary's limitations section verbatim.
 3. **C9 — duration/call limits are simple fixed checks**, not the more configurable
    per-role/per-stage budgeting the project-hardening layer (§9, COULD) eventually
    wants. Not a capability gap against C9's stated ACs, noted for completeness only.
+4. **C12-AC4/AC5 — central audit-repo publishing is not built.** Requirements rev 2
+   (D-20) already moved this MUST → SHOULD for Phase 1 in the source document itself —
+   not a trim this proposal introduces. Run records stay in `ORCH_HOME/runs/`,
+   protected by the hash-chained event log, with the three showcase runs committed to
+   `evidence/runs/` as the source document's own Phase 1 substitute (§11.1). Listed
+   here for completeness since it belongs in the same engineering-summary limitations
+   list, not because this slice changed its status.
+5. **Workspace confinement's preventive CLI flags are not a hard boundary.** The P0
+   spike (`docs/spikes/claude-p-feasibility.md`, ADR-001) found `--restricted`'s block
+   on an out-of-workspace write looked like model judgment, not a confirmed technical
+   denial (`permission_denials` stayed empty). The mandatory post-stage filesystem
+   diff+hash check (C6, DECIDED) is the actual enforcement point — this was already
+   true by design (§2 O-6), but is now an empirically grounded limitation rather than
+   a documentation caveat: don't read the preventive flags as a guarantee.
 
 **At-risk items (schedule, not scope):**
 

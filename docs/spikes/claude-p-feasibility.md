@@ -9,13 +9,14 @@ scratch git repo, per the reviewer's constraints (`docs/tasks.md` P0).
 
 - `claude` CLI version: `2.1.268 (Claude Code)`.
 - Scratch repo: `/tmp/spike-target` (Windows path
-  `C:\Users\Prathibha\AppData\Local\Temp\spike-target`), `git init`'d, one commit.
+  `C:\Users\<user>\AppData\Local\Temp\spike-target`), `git init`'d, one commit.
 - Driver: `spike_driver.py` (+ `spike_driver_exp3.py` for the follow-up), run via
   `subprocess.run(cmd, cwd=..., timeout=180, capture_output=True, text=True)`.
   Full commands, exit codes, raw stdout/stderr, parsed JSON fields, and
-  `git status --porcelain` diffs for every call are in `spike_results.json` (kept
-  alongside the driver in the session scratchpad, not committed — this file is the
-  durable record).
+  `git status --porcelain` diffs for every call are in
+  [`spike_results.redacted.json`](spike_results.redacted.json) (committed alongside
+  this doc, local absolute paths redacted to `<user>`; the driver scripts themselves
+  stayed in the session scratchpad, not committed — they're throwaway).
 - **Constraint deviation:** the reviewer's constraint said "cap with `--max-turns`."
   `claude --help` on this version has no such flag — see "Other findings" below for
   what was used instead. Flagging this now for review at hard stop (a).

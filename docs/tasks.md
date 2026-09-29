@@ -165,30 +165,39 @@ yet) reaching `completed`; every stage's entry/exit gate exercised at least once
 
 ### T4.1 Profile rendering + real executor
 **Goal:** profile loader/render (O-10); real executor subprocess wrapper for
-`claude -p` with directory/tool restriction (O-6) and per-call timeout; JSON-summary
-response parsing per the revised O-4 (agent writes files via its own tools; response is
-`{summary, produced_ids, files_written}`).
+`claude -p` with directory/tool restriction (O-6) and a per-call timeout that kills
+the **whole process tree** on expiry (Windows: `taskkill /T /F` against the child's
+PID; POSIX: child launched in its own process group, group signaled), not just the
+direct child (ADR-001); JSON-summary response parsing per the revised O-4 (agent
+writes files via its own tools; response is `{summary, produced_ids,
+files_written}`).
 **Traces to:** C8-AC1–AC5, C9-AC5.
 **Files/modules:** `src/orchestrator/executors/real.py`; `src/orchestrator/profiles/
 {loader.py, render.py}`.
 **Dependencies:** P0 (spike findings must inform the flags used here), T1.4, T3.2.
 **DoD:** unit tests against a patched/fake subprocess covering: call exceeds
 timeout → outcome `timeout`; malformed summary → retryable-error outcome; well-formed
-summary → parsed `AgentCallResponse`. Plus one **live smoke call**: run S1 for real
-(`claude -p`) against a throwaway greenfield workspace, confirm `01-requirements.md`
-lands at the expected path and the JSON summary parses; record the command, exit code,
-and outcome in `docs/build-notes.md`. (Full three-scenario real execution is still
-T10.) `scripts/check.py` green.
+summary → parsed `AgentCallResponse`. Plus two live tests: (1) a **live smoke call**
+running S1 for real (`claude -p`) against a throwaway greenfield workspace, confirming
+`01-requirements.md` lands at the expected path and the JSON summary parses; (2) a
+**live timeout test** — launch a real call with a deliberately short timeout, confirm
+the process tree is fully terminated (no lingering `claude`/child processes, checked
+via the OS process list) and that no further file writes land in the workspace after
+the timeout fires. Record both results in `docs/build-notes.md`. (Full
+three-scenario real execution is still T10.) `scripts/check.py` green.
 
 ### T4.2 Agent profiles (7 roles)
 **Goal:** author `agents/profiles/*.toml` for analyst, architect, planner, developer,
 test engineer, technical writer, reviewer — each instructing tool-based writes + a
-small JSON summary per O-4.
+small JSON summary per O-4. Developer and test-engineer profiles get a scoped Bash
+limited to running pytest, named via `--tools` under `--restricted` (ADR-001); every
+other profile gets no Bash at all.
 **Traces to:** C8-AC2/AC6.
 **Files/modules:** `agents/profiles/*.toml`.
 **Dependencies:** T4.1.
-**DoD:** each profile validates against the profile schema from T1.1; `scripts/check.py`
-green.
+**DoD:** each profile validates against the profile schema from T1.1; developer and
+test-engineer profiles assert a `Bash(pytest *)`-scoped tool allowlist, and every
+other profile asserts no Bash entry present; `scripts/check.py` green.
 
 ---
 
@@ -439,9 +448,19 @@ validation, assumptions, limitations.
 **Files/modules:** `docs/engineering-summary.md`.
 **Dependencies:** T10.1–T10.3 (needs actual run outcomes, not just the plan, to
 summarize).
-**DoD:** includes every item from architecture-proposal.md §4.3's limitations list;
-covers assumptions (requirements.md §15 plus this proposal's "Assumed" O-items) and
-risks (requirements.md §18), each tied to what was actually built or deferred.
+**DoD:** the limitations section includes **all** of: (1) every item in
+architecture-proposal.md §4.3's limitations list (the 1-of-8 policy, the G-9
+re-planning extension, simple duration/call checks, central audit-repo publishing,
+and workspace confinement's flags not being a hard boundary), and (2) every
+SHOULD/COULD item listed in requirements.md §2's phase table that this slice didn't
+build (central audit-repo publishing incl. re-publish/audit-repo-link-in-PR,
+audit-record check in target CI, per-tool enforcement per agent role, resume after
+process kill, `status` with merged detection, and every COULD item: project-level
+hardening, stale-branch detection, automatic PR creation, central thresholds via
+reusable CI workflow, central runner deployment, git-worktree isolation, OpenTelemetry
+export) — each stated as built/not-built, not merely implied by omission. Also covers
+assumptions (requirements.md §15 plus this proposal's "Assumed" O-items) and risks
+(requirements.md §18), each tied to what was actually built or deferred.
 
 ---
 

@@ -60,11 +60,11 @@ not stop at a mock-only skeleton.
 ### Agent execution
 
 - **Agents write their deliverables directly into the workspace via their own tools**
-  (Write/Edit/Bash), returning only a small JSON summary (`produced_ids`,
-  `files_written`) — not a fenced-JSON-in-response payload (O-4, revised by
-  reviewer). Gates read the actual files off disk. **Verified** by the P0 spike: a
-  live call wrote its file exactly where instructed and returned the requested
-  summary shape verbatim, first attempt.
+  (Write/Edit, and a role-scoped Bash where granted — see below), returning only a
+  small JSON summary (`produced_ids`, `files_written`) — not a fenced-JSON-in-response
+  payload (O-4, revised by reviewer). Gates read the actual files off disk.
+  **Verified** by the P0 spike: a live call wrote its file exactly where instructed
+  and returned the requested summary shape verbatim, first attempt.
 - **Workspace confinement is `--restricted --add-dir <workspace> --allowedTools
   <profile list>` as a preventive layer, plus the mandatory post-stage filesystem
   diff+hash check** (O-6) — the post-stage check is the actual, non-negotiable
@@ -74,6 +74,14 @@ not stop at a mock-only skeleton.
   looked like model judgment rather than a confirmed hard denial — treated as
   reducing how often the post-stage check has to catch something, not as a
   substitute for it.
+- **Bash is role-scoped, not blanket-available.** Under `--restricted`, Bash and
+  other code-execution tools are removed by default unless named via `--tools`.
+  **Developer and test-engineer profiles get Bash re-enabled, scoped to running
+  pytest only** (named via `--tools` under `--restricted`, allowlisted narrowly, e.g.
+  `Bash(pytest *)`); every other role (analyst, architect, planner, technical writer,
+  reviewer) gets no Bash at all. This is a least-privilege narrowing on top of the
+  confinement above, not a substitute for it — the post-stage diff check still
+  enforces file confinement regardless of which tools a call used.
 - **Profiles render into a system prompt + CLI flags**, not Claude Code
   subagent/skill files (O-10) — keeps the executor interface
   (`execute(profile, inputs) -> response`) free of Claude-Code-specific filesystem
@@ -85,6 +93,13 @@ not stop at a mock-only skeleton.
   set for scenarios with no recorded fixture, used by the orchestrator's own tests.
 - **No `--max-turns` flag exists** in the current CLI (P0 finding) — per-call safety
   is `subprocess` `timeout` + `--max-budget-usd`, not a turn-count cap.
+- **On timeout, the whole process tree is killed, not just the direct child.**
+  `claude -p` can itself spawn further subprocesses (e.g. a Bash tool call); killing
+  only the `subprocess.Popen` handle the orchestrator holds would leave those running,
+  possibly still writing to the workspace after the orchestrator has already recorded
+  the call as `timeout` and moved on. Windows: `taskkill /T /F` against the child's
+  PID; POSIX: the child is launched in its own process group and the group is
+  signaled. Verified live in T4.1, not just unit-tested (see T4.1 DoD).
 
 ### Policies
 
