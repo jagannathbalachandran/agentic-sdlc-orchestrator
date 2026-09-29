@@ -21,6 +21,9 @@ dev = [
     "pip-audit>=2.7.0",
 ]
 
+[project.scripts]
+orchestrator = "orchestrator.cli.main:main"
+
 [tool.setuptools.packages.find]
 where = ["src"]
 

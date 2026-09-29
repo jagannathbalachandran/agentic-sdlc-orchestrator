@@ -207,3 +207,51 @@ resolution; run branch created via `create_run_branch`, matching D-5's
   the existing `scripts/check.py` justified-noqa pattern) and a fixed literal
   argument list per call site, never untrusted input (`# noqa: S603`).
 
+## T2.3 — CLI entry + `run`/`register`/`validate`; pause/resume proven
+
+**What changed:** `engine/locking.py` (PID+staleness lock, closes G-2 — platform
+branch for `pid_is_alive`: `ctypes`/`OpenProcess` on win32, `os.kill(pid, 0)` on
+POSIX, since Windows has no signal-0 liveness check); `engine/fsm.py` (`drive()` —
+reload state from disk, run the next pending stage, persist, release the lock);
+`cli/main.py` (dispatch), `cli/commands/{register,run}.py`; a
+`[project.scripts] orchestrator = ...` entry point added to `pyproject.toml`
+(package reinstalled to register it). 24 new tests, including
+`tests/integration/test_pause_resume.py` — **the DoD's core proof**: two separate
+`python -m orchestrator.cli.main run ... --run-id <same-id>` subprocess
+invocations, the first running S0 and exiting, the second reloading `graph.json`
+from disk in a fresh process and continuing with S1, with the lock file confirmed
+absent between and after both. 96.35% overall coverage — the gaps are expected,
+not real: `cli/commands/run.py` lines 51-71 and `cli/main.py`'s `run` dispatch
+branch are exercised by the integration test via subprocess, which pytest-cov
+can't see into from the parent process; `locking.py`'s POSIX branch of
+`pid_is_alive` is exercised by CI (ubuntu-latest) but not locally (Windows dev
+box) — both platform branches exist and are exercised somewhere, just not both
+in one run.
+
+**Covered:** C1-AC1/AC2 (`register`/`run`/`validate` all work; `run` creates a run
+ID and advances it); **directly validates O-1/O-2's pause/resume design** —
+architecture-proposal.md's central bet (stateless-process, reload-from-disk) now
+has a passing integration test behind it, not just a design doc.
+
+**Deferred / assumed:**
+- **`run` advances exactly one pending stage per invocation.** This is an honest
+  interim rule, not the final design: production `run` (once T3.1 adds real
+  approval checkpoints) should run every pending stage until it hits a checkpoint
+  or the graph is exhausted, in one process — matching architecture-proposal.md
+  §3.2.1's "between-checkpoint execution... all happens within one process."
+  There's no checkpoint logic to loop against yet (T3.1), so "one stage per call"
+  is the simplest correct behavior for today's 2-stage graph, and it's exactly
+  what let this task prove the reload mechanism directly rather than needing a
+  contrived crash-simulation harness.
+- **`--run-id` is a testing/internal affordance for now**, not documented as
+  normal human CLI usage — it's the same primitive T3.1's `approve`/`reject`/
+  `answer` commands will reuse to resume a paused run by its real run ID.
+- **Real `run.json` creation (C1-AC2's "record") is deferred to T3.2.** It needs
+  registry lookups, an effective-config hash, and real workspace/branch data that
+  aren't all wired together yet; writing a placeholder-filled `run.json` now would
+  just have to be redone once those pieces exist.
+- S0's *real* stage behavior (baseline gates, `00-source.md` with a recorded hash,
+  template copy via `workspace.manager`) is still not wired into `fsm.drive()` —
+  it runs on the mock executor's generic fixture today. T3.2 connects the real
+  workspace manager and gate logic to the graph.
+

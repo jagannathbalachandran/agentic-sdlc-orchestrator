@@ -41,3 +41,12 @@ class GitCommandError(OrchestratorError):
         self.args_ = args
         self.returncode = returncode
         self.stderr = stderr
+
+
+class ProjectLockedError(OrchestratorError):
+    """Another run already holds this project's lock (D-18: one active run per project)."""
+
+    def __init__(self, project_name: str, holder_pid: int) -> None:
+        super().__init__(f"project {project_name!r} is locked by pid {holder_pid}")
+        self.project_name = project_name
+        self.holder_pid = holder_pid
