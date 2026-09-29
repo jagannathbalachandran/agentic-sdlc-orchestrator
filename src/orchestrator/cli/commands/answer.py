@@ -13,6 +13,7 @@ from orchestrator.cli.commands._common import (
 from orchestrator.engine.fsm import DriveRequest, RunRef, drive, resolve_checkpoint
 from orchestrator.executors.mock import MockExecutor
 from orchestrator.models.approvals import ApprovalDecision
+from orchestrator.policies.registry import build_default_policies
 
 COMMAND_NAME = "answer"
 
@@ -41,6 +42,7 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
         DriveRequest(orch_home, args.project, args.run_id, graph_state.scenario_id),
         executor=MockExecutor(FIXTURES_ROOT),
         max_run_duration_seconds=duration,
+        policies=build_default_policies(),
     )
     print(describe(result.graph_state))
     return 0

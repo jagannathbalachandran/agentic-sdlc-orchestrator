@@ -36,3 +36,15 @@ secret_scan_patterns = [
     "(?i)secret\\s*[:=]\\s*['\"][A-Za-z0-9_\\-]{16,}['\"]",
     "-----BEGIN [A-Z ]*PRIVATE KEY-----",
 ]
+# Schema change control (C6): new/changed migrations require Change-control
+# approval rather than an automatic pass. fnmatch's `*` doesn't stop at `/`,
+# so root-level and nested variants are both listed explicitly rather than
+# relying on one pattern to cover both ("migrations/*" alone would not match
+# "src/app/migrations/*", and "*/migrations/*" alone would not match a
+# root-level "migrations/*" with no parent directory).
+migration_path_globs = [
+    "migrations/*",
+    "*/migrations/*",
+    "alembic/versions/*",
+    "*/alembic/versions/*",
+]

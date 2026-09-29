@@ -13,5 +13,6 @@ SPEC = StageSpec(
     stage_id=StageId.S1_REQUIREMENTS,
     owner_profile="analyst",
     depends_on=(StageId.S0_PREPARE,),
+    allowed_write_paths=("01-requirements.md",),
     commit_strategy=CommitStrategy.ONE,
 )

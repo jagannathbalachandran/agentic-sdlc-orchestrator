@@ -8,5 +8,6 @@ SPEC = StageSpec(
     stage_id=StageId.S0_PREPARE,
     owner_profile=None,
     depends_on=(),
+    allowed_write_paths=("00-source.md",),
     commit_strategy=CommitStrategy.ONE,
 )

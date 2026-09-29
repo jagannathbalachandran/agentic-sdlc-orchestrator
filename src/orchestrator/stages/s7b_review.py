@@ -12,5 +12,6 @@ SPEC = StageSpec(
     stage_id=StageId.S7B_REVIEW,
     owner_profile="reviewer",
     depends_on=(StageId.S6_VERIFY,),
+    allowed_write_paths=("04-review-findings.md",),
     commit_strategy=CommitStrategy.NONE,
 )

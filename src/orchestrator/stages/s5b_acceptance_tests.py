@@ -12,5 +12,6 @@ SPEC = StageSpec(
     stage_id=StageId.S5B_ACCEPTANCE_TESTS,
     owner_profile="test_engineer",
     depends_on=(StageId.S4_PLAN,),
+    allowed_write_paths=("tests/acceptance/**",),
     commit_strategy=CommitStrategy.ONE,
 )

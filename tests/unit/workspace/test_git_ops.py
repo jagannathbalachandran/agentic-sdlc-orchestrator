@@ -8,11 +8,16 @@ import pytest
 
 from orchestrator.exceptions import GitCommandError
 from orchestrator.workspace.git_ops import (
+    EMPTY_TREE_SHA,
     clone_repo,
     commit_all,
     create_branch,
+    current_branch,
     current_commit,
+    current_commit_or_empty_tree,
+    ensure_on_branch,
     init_repo,
+    read_file_at_commit,
     run_git,
 )
 
@@ -62,3 +67,73 @@ def test_run_git_raises_git_command_error_on_failure(tmp_path: Path) -> None:
     repo.mkdir()
     with pytest.raises(GitCommandError):
         run_git(repo, "rev-parse", "HEAD")
+
+
+def test_current_commit_or_empty_tree_returns_the_sentinel_for_a_fresh_repo(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    assert current_commit_or_empty_tree(repo) == EMPTY_TREE_SHA
+
+
+def test_current_commit_or_empty_tree_returns_head_once_a_commit_exists(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _init_repo_with_one_commit(repo)
+    assert current_commit_or_empty_tree(repo) == sha
+
+
+def test_read_file_at_commit_returns_content_that_existed_at_that_commit(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _init_repo_with_one_commit(repo)
+    # run_git strips trailing whitespace (its established convention), so the
+    # source file's trailing newline doesn't survive the round trip.
+    assert read_file_at_commit(repo, sha, "README.md") == "# demo"
+
+
+def test_read_file_at_commit_returns_none_for_a_file_that_did_not_exist_there(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _init_repo_with_one_commit(repo)
+    assert read_file_at_commit(repo, sha, "does-not-exist.md") is None
+
+
+def test_current_branch_resolves_before_any_commit_exists(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    # A fresh git init's pending branch name (usually "main") resolves via
+    # symbolic-ref even though there's no commit yet to rev-parse.
+    assert current_branch(repo)
+
+
+def test_ensure_on_branch_creates_and_switches_when_the_branch_is_new(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_one_commit(repo)
+    ensure_on_branch(repo, "run/demo-1")
+    assert current_branch(repo) == "run/demo-1"
+
+
+def test_ensure_on_branch_is_a_no_op_when_already_on_it(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_one_commit(repo)
+    ensure_on_branch(repo, "run/demo-1")
+    ensure_on_branch(repo, "run/demo-1")
+    assert current_branch(repo) == "run/demo-1"
+
+
+def test_ensure_on_branch_switches_to_an_existing_branch_without_recreating_it(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_one_commit(repo)
+    create_branch(repo, "run/demo-1")
+    run_git(repo, "checkout", "-q", "-b", "other")
+    ensure_on_branch(repo, "run/demo-1")
+    assert current_branch(repo) == "run/demo-1"

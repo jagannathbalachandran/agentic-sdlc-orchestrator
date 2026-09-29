@@ -22,8 +22,10 @@ from orchestrator.engine.graph import GRAPH
 from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
 from orchestrator.executors.mock import MockExecutor
 from orchestrator.models.approvals import ApprovalCheckpointKind, ApprovalDecision
-from orchestrator.models.graph import StageId, StageSpec, StageStatus
+from orchestrator.models.graph import CommitStrategy, StageId, StageSpec, StageStatus
 from orchestrator.models.run import RunState
+from orchestrator.policies.schema_change_control import SchemaChangeControlPolicy
+from orchestrator.policies.secret_scan import SecretScanPolicy
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES_ROOT = REPO_ROOT / "fixtures" / "mock"
@@ -66,6 +68,30 @@ def _stub_graph_no_checkpoint() -> dict[StageId, StageSpec]:
             depends_on=(StageId.S0_PREPARE,),
         ),
     }
+
+
+def _stub_graph_s0_then_s6() -> dict[StageId, StageSpec]:
+    """S0 (commits) -> S6 (the policy checkpoint), nothing else — isolates
+    S6's dynamic-checkpoint mechanism (T6.2) from the rest of the real graph.
+    """
+    return {
+        StageId.S0_PREPARE: StageSpec(
+            stage_id=StageId.S0_PREPARE, commit_strategy=CommitStrategy.ONE
+        ),
+        StageId.S6_VERIFY: StageSpec(
+            stage_id=StageId.S6_VERIFY,
+            depends_on=(StageId.S0_PREPARE,),
+            commit_strategy=CommitStrategy.NONE,
+        ),
+    }
+
+
+def _write_fixture(
+    fixtures_root: Path, scenario_id: str, stage: str, fixture: dict[str, object]
+) -> None:
+    scenario_dir = fixtures_root / scenario_id
+    scenario_dir.mkdir(parents=True, exist_ok=True)
+    (scenario_dir / f"{stage}.json").write_text(json.dumps(fixture), encoding="utf-8")
 
 
 def _read_events(path: Path) -> list[dict[str, object]]:
@@ -356,3 +382,129 @@ def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
         and event["payload"]["gate_name"] == "existence"
     ]
     assert len(existence_gate_hits) == 1  # S2's exit gate, exercised once
+
+
+def test_s6_change_control_policy_violation_sets_pending_checkpoint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T6.2's DoD: a schema-change-control violation on S6's diff sets
+    pending_checkpoint = CHANGE_CONTROL — S6's StageSpec.checkpoint_after stays
+    None (the dynamic-checkpoint override, not the static field)."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_s0_then_s6())
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S0",
+        {
+            "summary": "wrote a migration",
+            "produced_ids": [],
+            "files_written": ["migrations/0001_init.py"],
+            "files": {"migrations/0001_init.py": "# migration\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S6",
+        {"summary": "verified", "produced_ids": [], "files_written": [], "files": {}},
+    )
+    policy = SchemaChangeControlPolicy(("migrations/*", "*/migrations/*"))
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+
+    result = drive(
+        request,
+        executor=MockExecutor(fixtures_root),
+        max_run_duration_seconds=3600,
+        policies=(policy,),
+    )
+
+    assert (
+        result.graph_state.pending_checkpoint is ApprovalCheckpointKind.CHANGE_CONTROL
+    )
+    assert result.graph_state.terminal_state is None
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    policy_events = [e for e in events if e["event_type"] == "policy_result"]
+    assert any(
+        isinstance(e["payload"], dict)
+        and e["payload"]["policy_id"] == "schema_change_control"
+        and e["payload"]["outcome"] == "change_control"
+        for e in policy_events
+    )
+
+
+def test_s6_with_a_clean_diff_does_not_pause(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The DoD's other half: a clean diff must not trigger the checkpoint."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_s0_then_s6())
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S0",
+        {
+            "summary": "wrote ordinary source",
+            "produced_ids": [],
+            "files_written": ["src/app.py"],
+            "files": {"src/app.py": "print('hi')\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S6",
+        {"summary": "verified", "produced_ids": [], "files_written": [], "files": {}},
+    )
+    policy = SchemaChangeControlPolicy(("migrations/*", "*/migrations/*"))
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+
+    result = drive(
+        request,
+        executor=MockExecutor(fixtures_root),
+        max_run_duration_seconds=3600,
+        policies=(policy,),
+    )
+
+    assert result.graph_state.pending_checkpoint is None
+    assert result.graph_state.terminal_state is RunState.COMPLETED
+
+
+def test_s6_critical_policy_violation_stops_the_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A critical outcome (e.g. secret_scan) ends the run as stopped, not just
+    a pause — C9's "critical violation" -> stopped, distinct from Change-control."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_s0_then_s6())
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S0",
+        {
+            "summary": "wrote a config with a leaked key",
+            "produced_ids": [],
+            "files_written": ["src/config.py"],
+            "files": {"src/config.py": "AWS_KEY = 'AKIAABCDEFGHIJKLMNOP'\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S6",
+        {"summary": "verified", "produced_ids": [], "files_written": [], "files": {}},
+    )
+    policy = SecretScanPolicy(("AKIA[0-9A-Z]{16}",))
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+
+    result = drive(
+        request,
+        executor=MockExecutor(fixtures_root),
+        max_run_duration_seconds=3600,
+        policies=(policy,),
+    )
+
+    assert result.graph_state.terminal_state is RunState.STOPPED
+    assert result.graph_state.pending_checkpoint is None
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    assert any(e["event_type"] == "stop" for e in events)

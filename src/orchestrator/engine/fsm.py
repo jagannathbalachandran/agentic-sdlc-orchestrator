@@ -41,7 +41,11 @@ from orchestrator.executors.base import Executor
 from orchestrator.gates.base import Gate
 from orchestrator.gates.existence_gate import ExistenceGate
 from orchestrator.gates.schema_gate import SchemaGate
-from orchestrator.models.approvals import ApprovalDecision, ApprovalRecord
+from orchestrator.models.approvals import (
+    ApprovalCheckpointKind,
+    ApprovalDecision,
+    ApprovalRecord,
+)
 from orchestrator.models.events import EventDraft, EventType
 from orchestrator.models.graph import (
     GraphState,
@@ -51,13 +55,19 @@ from orchestrator.models.graph import (
     StageStatus,
 )
 from orchestrator.models.run import RunState
-from orchestrator.workspace.git_ops import init_repo
+from orchestrator.policies.base import Policy, PolicyOutcome, compute_diff
+from orchestrator.workspace.git_ops import (
+    current_commit_or_empty_tree,
+    ensure_on_branch,
+    init_repo,
+)
 
 GRAPH_STATE_FILENAME = "graph.json"
 EVENTS_FILENAME = "events.jsonl"
 APPROVALS_FILENAME = "approvals.jsonl"
 DEFAULT_STAGE_TIMEOUT_SECONDS = 600
 DEFAULT_STAGE_BUDGET_USD = 0.5
+RUN_BRANCH_PREFIX = "run/"
 
 
 @dataclass(frozen=True)
@@ -219,8 +229,72 @@ def _build_request(
     )
 
 
+def _evaluate_s6_policies(
+    resources: _LoopResources, graph_state: GraphState, policies: tuple[Policy, ...]
+) -> bool:
+    """Run every C6 policy against the run's accumulated diff (S6's real exit
+    gate, requirements.md §7's "...all policies; change-control approval if
+    triggered"), and apply the dynamic-checkpoint/critical-stop override S6
+    needs — its `StageSpec.checkpoint_after` stays `None` (T6.2's shared
+    dynamic-checkpoint primitive, the same mechanism T7.4 needs for
+    Clarification). Worst outcome wins: a critical hit stops the run outright
+    (C9's "critical violation"); otherwise a change-control hit pauses for
+    approval; otherwise S6 simply stays passed and the loop continues to S7.
+    Returns whether it paused/stopped the run, so the caller knows whether a
+    clean pass should still fall through to the normal completion check.
+    """
+    base_commit = graph_state.base_commit or current_commit_or_empty_tree(
+        resources.workspace
+    )
+    diff = compute_diff(resources.workspace, base_commit)
+    results = [policy.check(diff) for policy in policies]
+    for result in results:
+        resources.event_log.append(
+            EventDraft(
+                run_id=resources.ref.run_id,
+                event_type=EventType.POLICY_RESULT,
+                recorded_at=datetime.now(UTC),
+                stage=StageId.S6_VERIFY.value,
+                payload={
+                    "policy_id": result.policy_id,
+                    "passed": result.passed,
+                    "outcome": result.outcome.value,
+                    "violations": list(result.violations),
+                },
+            )
+        )
+
+    if any(result.outcome is PolicyOutcome.CRITICAL for result in results):
+        graph_state.terminal_state = RunState.STOPPED
+        resources.event_log.append(
+            EventDraft(
+                run_id=resources.ref.run_id,
+                event_type=EventType.STOP,
+                recorded_at=datetime.now(UTC),
+                payload={"reason": "critical policy violation"},
+            )
+        )
+        return True
+    if any(result.outcome is PolicyOutcome.CHANGE_CONTROL for result in results):
+        graph_state.pending_checkpoint = ApprovalCheckpointKind.CHANGE_CONTROL
+        resources.event_log.append(
+            EventDraft(
+                run_id=resources.ref.run_id,
+                event_type=EventType.APPROVAL_REQUESTED,
+                recorded_at=datetime.now(UTC),
+                stage=StageId.S6_VERIFY.value,
+                payload={"checkpoint": ApprovalCheckpointKind.CHANGE_CONTROL.value},
+            )
+        )
+        return True
+    return False
+
+
 def _record_batch_result(
-    resources: _LoopResources, graph_state: GraphState, batch_result: BatchResult
+    resources: _LoopResources,
+    graph_state: GraphState,
+    batch_result: BatchResult,
+    policies: tuple[Policy, ...],
 ) -> StageStatus:
     """Record one batch member's result (and, if applicable, its checkpoint
     pause or run-completion) into `graph_state`. Runs only on the caller's own
@@ -236,7 +310,12 @@ def _record_batch_result(
         attempts=1,
         commits=(result.commit,) if result.commit else (),
     )
-    if result.status is StageStatus.PASSED and spec.checkpoint_after is not None:
+    if result.status is not StageStatus.PASSED:
+        pass
+    elif spec.stage_id is StageId.S6_VERIFY:
+        if not _evaluate_s6_policies(resources, graph_state, policies):
+            _complete_if_all_stages_passed(graph_state)
+    elif spec.checkpoint_after is not None:
         graph_state.pending_checkpoint = spec.checkpoint_after
         resources.event_log.append(
             EventDraft(
@@ -247,13 +326,16 @@ def _record_batch_result(
                 payload={"checkpoint": spec.checkpoint_after.value},
             )
         )
-    elif result.status is StageStatus.PASSED:
+    else:
         _complete_if_all_stages_passed(graph_state)
     return result.status
 
 
 def drive(
-    request: DriveRequest, executor: Executor, max_run_duration_seconds: float
+    request: DriveRequest,
+    executor: Executor,
+    max_run_duration_seconds: float,
+    policies: tuple[Policy, ...] = (),
 ) -> DriveResult:
     """Reload state from disk; loop ready-stage batches until paused, terminal,
     a stage fails, or the graph is exhausted. A batch is usually one stage, but
@@ -261,6 +343,12 @@ def drive(
     at once — engine/scheduler.py runs those concurrently (T6.1). State is
     persisted after every batch (not just at the end) so a process killed
     mid-loop leaves graph.json consistent with events.jsonl, not stale.
+
+    `policies` defaults to empty (no S6 policy checks at all) rather than
+    loading `config/defaults.toml` itself — that would make this function's
+    behavior depend on the current working directory. Real usage (the CLI
+    commands) explicitly passes `policies.registry.build_default_policies()`;
+    tests that don't care about S6's policies (most of them) need no changes.
     """
     ref = request.ref
     acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
@@ -272,6 +360,16 @@ def drive(
         # directory that's already a git repo (idempotent: a no-op if S0's real
         # logic already set one up here first).
         init_repo(workspace)
+        # D-5: create/switch to the run branch before any stage executes, so
+        # the run is never left on main — main_protection's policy check would
+        # otherwise (correctly) flag every run, since nothing else does this
+        # yet (S0's real prepare logic is the eventual real owner).
+        ensure_on_branch(workspace, f"{RUN_BRANCH_PREFIX}{ref.run_id}")
+        if graph_state.base_commit is None:
+            # Captured once, at the run's very first drive() call, so every S6
+            # policy check diffs the whole run's own changes, not the target
+            # repo's entire history.
+            graph_state.base_commit = current_commit_or_empty_tree(workspace)
         resources = _LoopResources(
             ref=ref,
             executor=executor,
@@ -295,7 +393,7 @@ def drive(
                 build_request=lambda spec: _build_request(resources, graph_state, spec),
             )
             statuses = [
-                _record_batch_result(resources, graph_state, batch_result)
+                _record_batch_result(resources, graph_state, batch_result, policies)
                 for batch_result in batch_results
             ]
             ran_stages.extend(

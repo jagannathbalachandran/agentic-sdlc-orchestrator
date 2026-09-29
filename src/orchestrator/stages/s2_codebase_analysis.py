@@ -13,5 +13,6 @@ SPEC = StageSpec(
     stage_id=StageId.S2_CODEBASE_ANALYSIS,
     owner_profile="analyst",
     depends_on=(StageId.S1_REQUIREMENTS,),
+    allowed_write_paths=("02-impact-analysis.md",),
     commit_strategy=CommitStrategy.NONE,
 )

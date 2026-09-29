@@ -12,6 +12,7 @@ SPEC = StageSpec(
     stage_id=StageId.S3_DESIGN,
     owner_profile="architect",
     depends_on=(StageId.S2_CODEBASE_ANALYSIS,),
+    allowed_write_paths=("02-design.md", "docs/architecture.md"),
     commit_strategy=CommitStrategy.ONE,
     checkpoint_after=ApprovalCheckpointKind.DESIGN,
 )

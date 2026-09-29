@@ -785,3 +785,115 @@ reliability behaviors by grepping for each: malformed-input rejection ✓,
   to scope each branch's `git add` to only its own allowed paths, if that
   distinction ever matters later.
 
+## T6.2 — Policies (7 of 8) + Change-control checkpoint
+
+**What changed:**
+- `policies/base.py` (new): `WorkspaceDiff`/`FileChange` (the shared input
+  every policy checks against), `PolicyOutcome` (`ok`/`change_control`/
+  `critical`), `PolicyResult`, the `Policy` protocol, and `compute_diff()` —
+  builds a `WorkspaceDiff` from real `git diff`/`git branch` output between a
+  base commit and HEAD. Policies are evaluated **once at S6**, against the
+  whole run's accumulated diff, not per-stage — S6 has no way to attribute a
+  changed file back to the stage that wrote it (two sibling stages can even
+  share one commit, T6.1's `git add -A` collapse).
+- 7 policy modules (`workspace_confinement.py`, `path_partitioning.py`,
+  `protected_paths.py`, `main_protection.py`, `secret_scan.py`,
+  `schema_change_control.py`, `diff_size_limit.py`) — dependency control
+  descoped per the task's own scope note (not built this slice). Each is a
+  small, independently-configured class with one `check(diff) -> PolicyResult`
+  method.
+- `policies/registry.py` (new): `build_default_policies()` — the CLI's one
+  integration point with real config (`config/defaults.toml`, cwd-relative,
+  matching `cli/commands/_common.py`'s existing convention) and the stage
+  graph's own `allowed_write_paths`. Kept out of `engine/fsm.py` itself so
+  `drive()` stays config-path-agnostic — `policies` defaults to `()` there,
+  not a lazily-loaded real set, so every existing test that doesn't care about
+  S6 policies needed no changes.
+- `engine/fsm.py`: `drive()` gained a `policies: tuple[Policy, ...] = ()`
+  param, threaded through to a new `_evaluate_s6_policies()` (called from
+  `_record_batch_result` specifically when S6 passes — the dynamic-checkpoint
+  primitive the task asked for: S6's own `StageSpec.checkpoint_after` stays
+  `None`, same mechanism T7.4 will reuse for Clarification). Worst outcome
+  wins: any `critical` hit sets `terminal_state = STOPPED` (+ a `stop` event,
+  C9's "critical violation"); otherwise any `change_control` hit sets
+  `pending_checkpoint = CHANGE_CONTROL` (+ `approval_requested`); otherwise S6
+  falls through to the normal completion check, same as any other stage.
+  Every policy's verdict is recorded as its own `policy_result` event
+  (C6-AC2: policy ID, outcome, evidence).
+- `models/graph.py`: `GraphState` gained `base_commit: str | None` — captured
+  once, at a run's very first `drive()` call (right after `init_repo`), so S6
+  always diffs *this run's* changes, not the target repo's whole history. A
+  brand-new, zero-commit workspace uses git's well-known empty-tree SHA
+  (`git_ops.EMPTY_TREE_SHA`) as the sentinel base.
+- `cli/commands/{run,approve,reject,answer}.py`: each now passes
+  `policies=build_default_policies()` to its `drive()` call — the only 4 real
+  integration points; every other caller (tests) keeps the empty default.
+- `config/schema.py`/`config/defaults.toml`: `PolicyConfig` gained
+  `migration_path_globs` (default `()`, so old configs still validate), with
+  real defaults covering both root-level and nested `migrations/`/
+  `alembic/versions/` layouts (fnmatch's `*` doesn't stop at `/`, so
+  "migrations/\*" and "\*/migrations/\*" both needed listing explicitly).
+- Every agent-driven stage's `StageSpec` (`stages/s*.py`) gained
+  `allowed_write_paths`, matching the T4.2 profiles' own stated
+  responsibilities exactly (e.g. developer -> `src/**`+`tests/unit/**`, test
+  engineer -> `tests/acceptance/**`) — `path_partitioning`'s config is the
+  *union* of these across the whole graph (`registry.py`), since it can't
+  attribute a file back to one stage either.
+
+**Two real, pre-existing bugs this surfaced and fixed (not T6.2's own new
+code, but blocking it from working at all):**
+1. **No `run/<run-id>` branch was ever created.** D-5 requires the run branch
+   before any stage executes, but nothing wired `workspace/manager.py`'s
+   already-built `create_branch()` into `drive()` — every run silently stayed
+   on `main`. `main_protection`'s very first real exercise (via the CLI) caught
+   this immediately (correctly stopping the run) rather than masking it.
+   Fixed by adding `git_ops.ensure_on_branch()` (idempotent: creates the
+   branch if new, switches if it exists, no-ops if already on it) and calling
+   it from `drive()` right after `init_repo()` — same "necessary, not just
+   tidy" pattern as T6.1's `init_repo()` call.
+2. **`git rev-parse --abbrev-ref HEAD` fails on a zero-commit repo** ("fatal:
+   ambiguous argument 'HEAD'") — used both by the new `ensure_on_branch`/
+   `current_branch` and by `compute_diff`'s branch lookup. Fixed by switching
+   to `git symbolic-ref --short HEAD`, which resolves the *pending* branch
+   name regardless of whether it has any commits yet.
+
+**Covered:** C6-AC1/AC2 (7 of 8 policies); C7 (Change-control checkpoint).
+
+**Outcome-severity judgment calls (C6's bullet list names outcomes for
+main-protection, secret-scan, schema-change-control, and diff-size-limit
+explicitly; workspace-confinement and path-partitioning aren't given one) —
+documented, not silently assumed:**
+- `workspace_confinement` and `path_partitioning` are both treated as
+  **critical** — the same severity class as main-protection/secret-scan, on
+  the reasoning that an agent writing outside its confinement/scope boundary
+  is a containment breach, not a "needs a human to weigh in" situation.
+- `protected_paths` is also treated as **critical** (not explicitly stated
+  either) — tampering with CI/quality-gate config or a secrets-file path is
+  reasoned the same way.
+
+**Tests:** `tests/unit/policies/` (new directory) — one file per policy, each
+proving detection *and* the specified/assumed outcome (C6-AC1's literal
+requirement) plus a clean-diff pass case; `protected_paths` additionally
+proves G-4's section-aware distinction with a real 2-commit git repo (editing
+`[tool.ruff]` is flagged, editing `[project.dependencies]` alone is not).
+`test_base.py` (compute_diff against a real repo), `test_registry.py`
+(`build_default_policies` + the allowed-path-globs union covers every real
+generic-fixture output). `tests/unit/workspace/test_git_ops.py` extended for
+`ensure_on_branch`/`current_branch`/`current_commit_or_empty_tree`/
+`read_file_at_commit`. `tests/unit/engine/test_fsm.py` gained the DoD's
+required test (a `schema_change_control` violation sets `pending_checkpoint =
+CHANGE_CONTROL`; a clean diff does not — same stub-graph pair) plus a third
+proving the `critical` path ends the run `stopped`, not just paused. Full
+gate: 210 tests, 97.14% coverage.
+
+**Deferred / assumed:**
+- Dependency control (8th policy) stays out of scope this slice, exactly as
+  the task named — `[project.dependencies]` edits pass unblocked through
+  `protected_paths`' section-aware check by design (G-4), but nothing yet
+  checks a new dependency against a project's approved list.
+- S0's real workspace preparation (registry lookup, clone/template copy) is
+  still unwired — `drive()` now does exactly two minimum-viable pieces of that
+  job (`init_repo`, `ensure_on_branch`), not a substitute for the real thing.
+- `stage_commit_hook`'s commit messages remain minimal; T8.1 still owns real
+  trailer formatting.
+

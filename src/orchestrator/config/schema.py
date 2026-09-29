@@ -33,6 +33,7 @@ class PolicyConfig(BaseModel):
 
     protected_path_globs: tuple[str, ...]
     secret_scan_patterns: tuple[str, ...]
+    migration_path_globs: tuple[str, ...] = ()
 
 
 class DefaultsConfig(BaseModel):

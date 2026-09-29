@@ -94,3 +94,4 @@ class GraphState(BaseModel):
     stages: dict[StageId, StageResult] = Field(default_factory=dict)
     pending_checkpoint: ApprovalCheckpointKind | None = None
     terminal_state: RunState | None = None
+    base_commit: str | None = None

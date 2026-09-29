@@ -21,6 +21,7 @@ from orchestrator.cli.commands._common import (
 )
 from orchestrator.engine.fsm import DriveRequest, drive, generate_run_id
 from orchestrator.executors.mock import MockExecutor
+from orchestrator.policies.registry import build_default_policies
 
 COMMAND_NAME = "run"
 
@@ -62,6 +63,7 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
         ),
         executor=MockExecutor(FIXTURES_ROOT),
         max_run_duration_seconds=max_run_duration_seconds(),
+        policies=build_default_policies(),
     )
     if (
         result.graph_state.terminal_state is not None
