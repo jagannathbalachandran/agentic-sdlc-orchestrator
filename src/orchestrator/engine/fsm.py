@@ -12,7 +12,7 @@ run's `scenario_id` is already persisted in graph.json.
 
 Real run.json creation (C1-AC2's "record") is still deferred — it needs registry
 lookups, config-hash computation, and real workspace/branch data not all wired
-together until T3.2.
+together yet.
 """
 
 from __future__ import annotations
@@ -125,6 +125,18 @@ def _all_stages_passed(graph_state: GraphState) -> bool:
     )
 
 
+def _complete_if_all_stages_passed(graph_state: GraphState) -> None:
+    """The single place `terminal_state = COMPLETED` (D-14) gets decided.
+
+    Called from two sites that can each be "the last thing that finishes a
+    run" — drive() (a stage passes with no checkpoint attached) and
+    resolve_checkpoint() (clearing the last checkpoint, e.g. Release after S8)
+    — rather than duplicating the same condition in both.
+    """
+    if graph_state.terminal_state is None and _all_stages_passed(graph_state):
+        graph_state.terminal_state = RunState.COMPLETED
+
+
 def _next_pending_stage(graph_state: GraphState) -> StageSpec | None:
     for stage_id, spec in GRAPH.items():
         result = graph_state.stages.get(stage_id)
@@ -215,10 +227,8 @@ def drive(
                     payload={"checkpoint": spec.checkpoint_after.value},
                 )
             )
-        elif result.status is StageStatus.PASSED and _all_stages_passed(graph_state):
-            # D-14: completed = Release approved (S8's checkpoint already cleared
-            # by the time this is the last stage) and nothing left to run.
-            graph_state.terminal_state = RunState.COMPLETED
+        else:
+            _complete_if_all_stages_passed(graph_state)
         atomic_write_json(_state_path(ref), graph_state)
         return DriveResult(ran_stage=spec.stage_id, graph_state=graph_state)
     finally:
@@ -274,12 +284,12 @@ def resolve_checkpoint(
         graph_state.pending_checkpoint = None
         if decision is ApprovalDecision.REJECT_FINAL:
             graph_state.terminal_state = RunState.REJECTED
-        elif _all_stages_passed(graph_state):
+        else:
             # Clearing the last checkpoint (Release, after S8) with nothing else
-            # pending completes the run (D-14) — drive()'s own completion check
-            # never runs for S8 since it takes the checkpoint branch, not the
-            # "stage passed with no checkpoint" branch.
-            graph_state.terminal_state = RunState.COMPLETED
+            # pending can complete the run (D-14) — drive()'s own completion
+            # check never runs for S8 since it takes the checkpoint branch, not
+            # the "stage passed with no checkpoint" branch.
+            _complete_if_all_stages_passed(graph_state)
         atomic_write_json(_state_path(ref), graph_state)
         return graph_state
     finally:
