@@ -1,0 +1,8 @@
+{
+  "summary": "Generic fallback: T-1.1 planned under FR-1, citing DD-1.",
+  "produced_ids": ["T-1.1"],
+  "files_written": ["03-plan.md"],
+  "files": {
+    "03-plan.md": "# Plan\n\n## FR-1\n- T-1.1 (DD-1): generic placeholder task.\n"
+  }
+}

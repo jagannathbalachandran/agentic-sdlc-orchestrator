@@ -304,3 +304,70 @@ and tested in T2.2/T2.3 — not re-tested here, just relied on.
   theoretically acquire the lock. Not a concern at this build stage; flagged here
   rather than silently accepted.
 
+## T3.2 — Full S0–S8 graph, stub gates, Change-control + Release checkpoints
+
+**What changed:** `src/orchestrator/stages/` — 9 thin modules
+(`s0_prepare.py` … `s8_release.py`), each exporting one `SPEC: StageSpec`;
+`engine/graph.py` now assembles `GRAPH` from all nine. `S5a→S5b` and `S7a→S7b`
+are sequential dependency chains for now (T3.2's own "no parallel yet" scope) —
+T6.1's scheduler restores the real parallel-join shape. `gates/{schema_gate,
+existence_gate,approval_gate}.py` — `SchemaGate` (stub, always passes) wired as
+every stage's entry gate and every non-S2 stage's sole exit gate; `ExistenceGate`
+(stub) added as S2's second exit gate; `ApprovalGate` built standalone per the
+architecture's module list but **not** wired into any `StageSpec`, since
+`fsm.drive()`'s own `pending_checkpoint` check already blocks a paused run
+earlier and more directly — documented rather than silently duplicated.
+`engine/fsm.py`: `_gates_for()` wires the above into every `StageRunner`
+construction; `drive()` and `resolve_checkpoint()` both gained the "all nine
+stages passed → `terminal_state = COMPLETED`" check (D-14) — needed in *both*
+places, since S8's own completion happens inside `resolve_checkpoint()` (its
+Release checkpoint is cleared there, not inside `drive()`'s "stage passed, no
+checkpoint" branch). Fixture set completed: `fixtures/mock/_generic/{S2..S8}.json`
+alongside the existing S0/S1. 12 new tests (5 gate tests, `engine/graph.py`
+rewritten to check the shape of the real 9-stage graph, and the DoD's core proof
+— see below). 96.77% overall coverage.
+
+**Covered:** C4-AC3 (`S2 always runs otherwise` half — see deferred note below
+for the other half); C5-AC1 partially (every stage has an entry/exit gate; the
+"come from the global config" part of C5-AC1 is still deferred, gates are
+hardcoded per stage_id, not config-driven — that's O-7/T6.2 territory), C5-AC2
+(a failed exit gate raises `StageGateFailure` before any downstream stage
+result is recorded — already true since T2.1, exercised now on every stage),
+C5-AC3 (every gate result recorded as an event — directly asserted in the new
+end-to-end test: 18 `SchemaGate` hits = 2 × 9 stages, 1 `ExistenceGate` hit on
+S2); §7 (the full graph shape, both unconditional checkpoints).
+
+**The DoD's core proof:**
+`test_end_to_end_real_graph_reaches_completed_through_all_nine_stages` in
+`tests/unit/engine/test_fsm.py` drives the real, unpatched `GRAPH` — not a stub —
+through all nine stages on the mock executor, resolving the Design checkpoint
+(after S3) and the Release checkpoint (after S8) via `resolve_checkpoint()`,
+and asserts `terminal_state is RunState.COMPLETED`, every stage `PASSED`, and
+every gate actually exercised. Found and fixed a real bug while writing it: the
+COMPLETED transition only existed in `drive()`'s per-stage-pass branch, which
+S8 never takes (it takes the checkpoint branch instead) — without the fix in
+`resolve_checkpoint()`, a run that only ever reached Release approval would
+silently never reach `completed`.
+
+**Deferred / assumed:**
+- **S2's "skipped for greenfield" half of C4-AC3 is not built.** S2 always runs;
+  detecting greenfield-vs-existing (and conditionally skipping) needs
+  project-type detection not wired into the graph yet. Documented as a
+  limitation at each relevant stage file, not silently omitted.
+- **Clarification (after S1) and Change-control (after S6) are not wired.**
+  Both are conditional in the real design (blocking questions / risky change)
+  and neither detection exists yet (real agent output for the former, T4;
+  diff-size/dependency policies for the latter, T6.2) — wiring them
+  unconditionally would misrepresent the DECIDED "conditional" semantics more
+  than leaving them unwired does. Only Design and Release (both unconditional,
+  C7: "always") are wired.
+- **Gates are hardcoded per `stage_id` in `fsm._gates_for()`, not config-driven**
+  — C5-AC1's "come from the global config" is deferred to whenever a real
+  config-driven gate/policy mechanism exists (O-7, T6.2); `StageSpec` doesn't
+  carry a gate list of its own yet.
+- The integration test's third-process assertion (`tests/integration/
+  test_pause_resume.py`) was updated from "nothing to do" (2-stage graph) to
+  "ran S2" (9-stage graph) — it still only proves the reload mechanism across
+  processes; the full 9-stage-to-completed path is unit-tested (faster, more
+  precise), not repeated via subprocess.
+

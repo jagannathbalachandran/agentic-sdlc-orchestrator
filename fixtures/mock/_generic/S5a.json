@@ -1,0 +1,9 @@
+{
+  "summary": "Generic fallback: T-1.1 implemented with a unit test.",
+  "produced_ids": ["T-1.1"],
+  "files_written": ["src/placeholder.py", "tests/unit/test_placeholder.py"],
+  "files": {
+    "src/placeholder.py": "\"\"\"Generic placeholder implementation.\"\"\"\n",
+    "tests/unit/test_placeholder.py": "\"\"\"Generic placeholder unit test.\"\"\"\n"
+  }
+}

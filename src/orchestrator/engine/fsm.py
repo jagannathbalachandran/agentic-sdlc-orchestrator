@@ -26,9 +26,12 @@ from orchestrator.audit.event_log import EventLog
 from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
-from orchestrator.engine.runner import StageRunner, StageRunRequest
+from orchestrator.engine.runner import StageGates, StageRunner, StageRunRequest
 from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
 from orchestrator.executors.base import Executor
+from orchestrator.gates.base import Gate
+from orchestrator.gates.existence_gate import ExistenceGate
+from orchestrator.gates.schema_gate import SchemaGate
 from orchestrator.models.approvals import ApprovalDecision, ApprovalRecord
 from orchestrator.models.events import EventDraft, EventType
 from orchestrator.models.graph import (
@@ -105,6 +108,23 @@ def generate_run_id(
     return f"{prefix}{next_seq:03d}"
 
 
+def _gates_for(stage_id: StageId) -> StageGates:
+    """Every stage gets the stub SchemaGate; S2 also gets the stub ExistenceGate
+    on exit ("every referenced file/symbol exists", §7's S2 exit-gate row)."""
+    exit_gates: tuple[Gate, ...] = (SchemaGate(),)
+    if stage_id is StageId.S2_CODEBASE_ANALYSIS:
+        exit_gates = (*exit_gates, ExistenceGate())
+    return StageGates(entry=(SchemaGate(),), exit=exit_gates)
+
+
+def _all_stages_passed(graph_state: GraphState) -> bool:
+    return all(
+        graph_state.stages.get(stage_id, StageResult(stage_id=stage_id)).status
+        is StageStatus.PASSED
+        for stage_id in GRAPH
+    )
+
+
 def _next_pending_stage(graph_state: GraphState) -> StageSpec | None:
     for stage_id, spec in GRAPH.items():
         result = graph_state.stages.get(stage_id)
@@ -160,7 +180,10 @@ def drive(
             run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
         )
         runner = StageRunner(
-            executor=executor, event_log=event_log, clock=lambda: datetime.now(UTC)
+            executor=executor,
+            event_log=event_log,
+            clock=lambda: datetime.now(UTC),
+            gates=_gates_for(spec.stage_id),
         )
 
         result = runner.run(
@@ -192,6 +215,10 @@ def drive(
                     payload={"checkpoint": spec.checkpoint_after.value},
                 )
             )
+        elif result.status is StageStatus.PASSED and _all_stages_passed(graph_state):
+            # D-14: completed = Release approved (S8's checkpoint already cleared
+            # by the time this is the last stage) and nothing left to run.
+            graph_state.terminal_state = RunState.COMPLETED
         atomic_write_json(_state_path(ref), graph_state)
         return DriveResult(ran_stage=spec.stage_id, graph_state=graph_state)
     finally:
@@ -247,6 +274,12 @@ def resolve_checkpoint(
         graph_state.pending_checkpoint = None
         if decision is ApprovalDecision.REJECT_FINAL:
             graph_state.terminal_state = RunState.REJECTED
+        elif _all_stages_passed(graph_state):
+            # Clearing the last checkpoint (Release, after S8) with nothing else
+            # pending completes the run (D-14) — drive()'s own completion check
+            # never runs for S8 since it takes the checkpoint branch, not the
+            # "stage passed with no checkpoint" branch.
+            graph_state.terminal_state = RunState.COMPLETED
         atomic_write_json(_state_path(ref), graph_state)
         return graph_state
     finally:

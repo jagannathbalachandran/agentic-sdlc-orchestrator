@@ -18,6 +18,7 @@ from orchestrator.engine.fsm import (
     stop_run,
     workspace_dir,
 )
+from orchestrator.engine.graph import GRAPH
 from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
 from orchestrator.executors.mock import MockExecutor
 from orchestrator.models.approvals import ApprovalCheckpointKind, ApprovalDecision
@@ -94,7 +95,7 @@ def test_drive_runs_one_stage_per_call_and_reloads_state_between_calls(
     )
 
     third = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert third.ran_stage is None
+    assert third.ran_stage is StageId.S2_CODEBASE_ANALYSIS
 
 
 def test_drive_creates_a_fresh_workspace_and_writes_stage_files(tmp_path: Path) -> None:
@@ -231,3 +232,70 @@ def test_stop_run_raises_if_the_run_is_already_terminal(tmp_path: Path) -> None:
 
     with pytest.raises(RunAlreadyTerminalError):
         stop_run(request.ref, "second stop", 3600)
+
+
+def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
+    tmp_path: Path,
+) -> None:
+    """T3.2's core DoD: drive the real (unpatched) 9-stage graph on the mock
+    executor, resolving the Design and Release checkpoints along the way, and
+    confirm the run reaches `completed` with every stage passed and every
+    stage's entry/exit gate actually exercised (recorded as gate_result events).
+    """
+    executor = MockExecutor(FIXTURES_ROOT)
+    request = _request(tmp_path)
+
+    # S0, S1, S2 run without pausing (no checkpoint on any of them yet).
+    for _ in range(3):
+        result = drive(request, executor=executor, max_run_duration_seconds=3600)
+        assert result.ran_stage is not None
+
+    # S3 (Design) passes, then pauses.
+    paused_at_design = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert paused_at_design.ran_stage is StageId.S3_DESIGN
+    assert (
+        paused_at_design.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
+    )
+
+    resolve_checkpoint(request.ref, ApprovalDecision.APPROVE, "approved", "alice", 3600)
+
+    # S4, S5a, S5b, S6, S7a, S7b run without pausing.
+    for _ in range(6):
+        result = drive(request, executor=executor, max_run_duration_seconds=3600)
+        assert result.ran_stage is not None
+
+    # S8 (Release) passes, then pauses.
+    paused_at_release = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert paused_at_release.ran_stage is StageId.S8_RELEASE
+    assert (
+        paused_at_release.graph_state.pending_checkpoint
+        is ApprovalCheckpointKind.RELEASE
+    )
+
+    final_state = resolve_checkpoint(
+        request.ref, ApprovalDecision.APPROVE, "approved", "alice", 3600
+    )
+    assert final_state.terminal_state is RunState.COMPLETED
+    assert all(
+        result.status is StageStatus.PASSED for result in final_state.stages.values()
+    )
+    assert len(final_state.stages) == len(GRAPH)
+
+    # Every stage's entry/exit gate was exercised (recorded as gate_result events).
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    gate_events = [event for event in events if event["event_type"] == "gate_result"]
+    schema_gate_hits = [
+        event
+        for event in gate_events
+        if isinstance(event["payload"], dict)
+        and event["payload"]["gate_name"] == "schema"
+    ]
+    # Two SchemaGate checks (entry + exit) per stage, for all nine stages.
+    assert len(schema_gate_hits) == len(GRAPH) * 2
+    existence_gate_hits = [
+        event
+        for event in gate_events
+        if isinstance(event["payload"], dict)
+        and event["payload"]["gate_name"] == "existence"
+    ]
+    assert len(existence_gate_hits) == 1  # S2's exit gate, exercised once

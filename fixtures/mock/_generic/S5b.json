@@ -1,0 +1,8 @@
+{
+  "summary": "Generic fallback: acceptance test for FR-1.AC1.",
+  "produced_ids": [],
+  "files_written": ["tests/acceptance/test_fr1.py"],
+  "files": {
+    "tests/acceptance/test_fr1.py": "\"\"\"Generic placeholder acceptance test for FR-1.AC1.\"\"\"\n"
+  }
+}

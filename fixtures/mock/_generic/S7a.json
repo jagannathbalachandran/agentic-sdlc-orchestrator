@@ -1,0 +1,8 @@
+{
+  "summary": "Generic fallback: docs updated for FR-1.",
+  "produced_ids": [],
+  "files_written": ["README.md"],
+  "files": {
+    "README.md": "# Placeholder project\n\nGeneric placeholder docs update.\n"
+  }
+}

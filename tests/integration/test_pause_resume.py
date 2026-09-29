@@ -83,9 +83,13 @@ def test_run_command_across_two_subprocesses_proves_state_reload(
     assert (workspace / "00-source.md").is_file()
     assert (workspace / "01-requirements.md").is_file()
 
-    # A third process finds the graph exhausted — proving the loop terminates.
+    # A third, separate process reloads again and continues with S2 — the graph
+    # now has all nine stages (T3.2); the full run-to-completed path (incl. the
+    # Design/Release checkpoints) is covered by the faster unit-level
+    # test_end_to_end_real_graph_reaches_completed_through_all_nine_stages in
+    # tests/unit/engine/test_fsm.py, not repeated here via subprocess.
     third = _run_cli(
         orch_home, "run", project, scenario_id, "--mock", "--run-id", run_id
     )
     assert third.returncode == 0, third.stderr
-    assert "nothing to do" in third.stdout
+    assert "ran S2" in third.stdout
