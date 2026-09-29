@@ -62,3 +62,64 @@ contract, parallel execution, workspace confinement for claude -p, policy
 expression, mock fixtures, module layout, applying profiles to claude -p.
 
 Duration: 3 hours
+
+
+## 2026-09-29 — Architecture proposal and Phase 1 task list
+
+**Tool:** Claude Code (analysis only; no code, no commands beyond reading files)
+**Inputs:** docs/requirements.md (rev 2), docs/assignment.md
+**Outputs:** docs/architecture-proposal.md (rev 2), docs/tasks.md
+
+**Prompt (summary):** Analyse the requirements for gaps and brief coverage;
+decide open items O-1..O-10 with options, trade-offs and a Verified/Assumed
+status; propose architecture and module layout; produce an ordered build plan
+traced to capability/AC IDs with effort and scope risks for ~12h.
+
+**What the agent identified on its own:**
+- The need to validate `claude -p` behaviour before building the real executor
+  (P0 spike), without being told; O-4, O-6 and O-10 marked "Assumed".
+- 12 gaps (G-1..G-12), notably: pause/resume must rebuild state from disk
+  across CLI processes; stale-lock recovery; git and event-log races between
+  parallel stages (fixed with a single lock and path-scoped `git add`);
+  protected paths vs. dependency control in the same file; fixture fallback
+  for tests before any real run exists.
+- B-1: the brief asks for "reliability features", but none of the three
+  scenarios requested any.
+
+**Review round 1 — my corrections:**
+- Scope: the agent's plan concluded 12h reaches only a mock-only build, with
+  the real executor and all showcase runs deferred. Rejected: the brief grades
+  realism of outputs and the three scenarios. Revised D-19 so the build is a
+  vertical slice reaching real runs, with specific MUST items trimmed and
+  recorded as limitations.
+- Added gaps it missed: G-13 (S6 retry = one fix call, `Stage: S5a-fix`
+  trailer), G-14 (rollback target = checkpoint recorded at every passed stage),
+  G-15 (review loop also invalidates S7a docs), G-16 (honest fault injection
+  for the brownfield retry demo).
+- O-4: replaced "return documents as text with fenced JSON" with "agents write
+  files via tools, return a small JSON summary; gates read the files".
+- Accepted B-1: greenfield requirement text broadened to include reliability
+  behaviour.
+
+**Review round 2 — my corrections:**
+- Caught a contradiction: the trimmed plan dropped schema change control, but
+  the brownfield scenario needs it to trigger change-control approval for its
+  migration. Now 7 of 8 policies; only dependency control descoped.
+- Added T12 (README, architecture overview, engineering summary), which were
+  deliverables missing from the plan.
+- Fault injection fixed to one mechanism: the orchestrator writes one failing
+  acceptance test before S6 attempt 1, recorded `injected: true`.
+
+**Task list review — my corrections before approving:**
+- T5.2 made human-owned; brownfield target is a copy of A1 so the submitted
+  A1 repo is never modified.
+- Added a live `claude -p` smoke call to T4 so executor problems surface
+  before the showcase runs.
+- Coverage threshold aligned between check.py and the task list (<value>).
+
+**Verification:** Read both documents in full; checked the gap list, scope
+trims and task dependencies against the requirements and the brief.
+
+**Takeaway:** The agent's analysis was thorough on engine mechanics but
+optimised for completeness against the requirements rather than for what the
+submission is judged on. The key scope decision needed human judgement.
