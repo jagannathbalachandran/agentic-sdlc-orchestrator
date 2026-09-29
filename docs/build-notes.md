@@ -480,3 +480,43 @@ real target repos are wired up.
 - pip-audit gate correctly skips auditing this project's own package
   (`orchestrator` isn't on PyPI) — pre-existing gate behavior, not new here.
 
+## T4.2 — Agent profiles (7 roles)
+
+**What changed:** authored `agents/profiles/{analyst,architect,planner,developer,
+test_engineer,technical_writer,reviewer}.toml`, one per requirements.md §7's stage
+table (C8). Each carries persona, responsibilities (drawn directly from its
+stage's row — e.g. analyst covers S1 + S2, architect covers S3, developer is
+scoped to exactly one plan task per call for S5a), rules, and the `{summary,
+produced_ids, files_written}` JSON output contract (O-4 revised). Profile names
+match the `owner_profile` strings already hardcoded in `stages/s*.py` from T3.2
+(`analyst`, `architect`, `planner`, `developer`, `test_engineer`,
+`technical_writer`, `reviewer`) — no stage-binding changes needed.
+
+**Bash scoping (ADR-001):** only `developer` and `test_engineer` get
+`enabled_tools = ["Bash"]` and `Bash(python -m pytest *)` in
+`allowed_tool_patterns` (the corrected pattern, per hard-stop-(b) item 4); their
+rules explicitly instruct `python -m pytest tests/unit`/`tests/acceptance` —
+never a `.venv`-relative path, never bare `pytest` — so what the agent actually
+types matches the scoped pattern. Every other profile gets no Bash entry at all.
+
+**Analyst's `blocking_questions` field:** added to the analyst's output contract
+(not invented here — requirements.md's S1 exit-gate criteria already says "no
+unanswered blocking questions", so the field belongs in S1's real output shape
+from the start). Nothing consumes it yet; T7.4 wires the Clarification-checkpoint
+pause around it later, exactly as noted in its task entry.
+
+**Covered:** C8 (profiles: persona, responsibilities, allowed tools, output
+contract, rules); ADR-001's Bash-scoping decision.
+
+**Tests:** `tests/unit/profiles/test_agent_profiles_toml.py` (new) — asserts the
+directory has exactly the 7 expected role files; every profile validates against
+`AgentProfile`/`load_profile` (schema, non-empty persona/responsibilities/
+output_contract, a real version hash); developer/test_engineer assert the scoped
+Bash pattern; every other role asserts no `Bash` anywhere in `enabled_tools` or
+`allowed_tool_patterns`. Full gate: 159 tests, 96.45% coverage.
+
+**Deferred / assumed:**
+- Profile content (exact prompt wording) is expected to be iterated on during
+  T10's real showcase runs, same as O-10 flagged in the P0 spike — this task only
+  needed the tool-scoping and schema DoD, not final prompt tuning.
+
