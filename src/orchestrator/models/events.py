@@ -24,21 +24,28 @@ class EventType(StrEnum):
     FAULT_INJECTED = "fault_injected"
 
 
-class Event(BaseModel):
-    """One append-only, hash-chained entry in events.jsonl.
+class EventDraft(BaseModel):
+    """Event content before it takes its place in the hash chain.
 
     `injected` is a first-class field (not buried in payload) so G-16's
     fault-injection events are trivially distinguishable from organic ones.
+    Bundling these fields keeps `EventLog.append`/`_compute_hash` under the
+    project's max-args limit.
     """
 
-    sequence: int
     run_id: str
+    event_type: EventType
+    recorded_at: datetime
     stage: str | None = None
     attempt: int | None = None
     agent_call_id: str | None = None
-    event_type: EventType
     payload: dict[str, Any] = Field(default_factory=dict)
     injected: bool = False
-    recorded_at: datetime
+
+
+class Event(EventDraft):
+    """One append-only, hash-chained entry in events.jsonl."""
+
+    sequence: int
     prev_hash: str
     hash: str

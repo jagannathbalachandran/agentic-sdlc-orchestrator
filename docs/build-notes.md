@@ -94,3 +94,29 @@ rejected).
 - `config/defaults.toml`'s `secret_scan_patterns` and `protected_path_globs` are
   real, usable defaults, but the *policy classes* that consume them (T6.2) don't
   exist yet — this task only had to get the config schema and values right.
+
+## T1.3 — Hash-chained event log + atomic run-record I/O
+
+**What changed:** `src/orchestrator/audit/{event_log,run_record}.py`; added
+`RunRecordError` to `exceptions.py`. Split `models/events.py`'s `Event` into
+`EventDraft` (content, no chain position) + `Event` (adds sequence/prev_hash/hash) —
+a small refactor of T1.1's file, needed to keep `EventLog.append`/`_compute_hash`
+under the project's 5-arg limit (PLR0913) without losing type safety. 19 new tests
+across `tests/unit/audit/`. 100% coverage.
+
+**Covered:** C12-AC1 (every event has run/stage/attempt/agent-call correlation
+IDs); C12-AC2 (chain verification detects tamper/deletion — tested directly:
+editing a field after the fact, and removing a whole event, both flip `verify()` to
+`False`).
+
+**Deferred / assumed:**
+- `EventLog` is constructed fresh per process (per the stateless pause/resume
+  design, §3.2.1) — it reads the file's last line on `__init__` to pick up
+  `sequence`/`prev_hash` where a prior process left off. Within one process, its
+  internal lock is the serialization point two parallel stage threads (T6.1) will
+  share.
+- The interrupted-write test for `run_record.py` fails serialization itself (via a
+  test double whose `model_dump_json` raises), not the OS-level write call — this
+  covers the property DoD asks for (original file never corrupted) without
+  depending on OS-specific fault injection.
+

@@ -22,3 +22,12 @@ class ProjectNotRegisteredError(OrchestratorError):
     def __init__(self, project_name: str) -> None:
         super().__init__(f"project not registered: {project_name}")
         self.project_name = project_name
+
+
+class RunRecordError(OrchestratorError):
+    """A run-record file (run.json, graph.json, ...) could not be read or written."""
+
+    def __init__(self, path: str, reason: str) -> None:
+        super().__init__(f"{path}: {reason}")
+        self.path = path
+        self.reason = reason
