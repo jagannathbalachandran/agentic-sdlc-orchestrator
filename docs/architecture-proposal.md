@@ -341,12 +341,11 @@ different sources of truth. Folded into O-8 below.
 **Consequence for §3.3:** `AgentCallResponse` = `{summary, produced_ids, files_written}`,
 not a payload to parse; `Gate` implementations read from the workspace filesystem.
 
-**Status: Assumed**, but lower-risk than the dropped approach — it depends on `claude -p`
-reliably (a) writing files via its tools under an instructed path/naming convention and
-(b) still emitting a small trailing JSON summary, both closer to its native behavior than
-the fenced-block contract was. *Validate:* the spike (build-plan P0), followed by the
-first real stage call in the real-executor build task — confirm files land where expected
-and the summary is parseable — before the full profile system is built on top of it.
+**Status: Verified** (P0 spike, `docs/spikes/claude-p-feasibility.md`). A live
+`claude -p` call wrote its deliverable file exactly where instructed via its own
+tools and returned the requested summary shape (`{produced_ids, files_written}`)
+verbatim, first attempt, no fences or extra text to strip. No further validation
+needed before T4.1.
 
 ### O-5. Parallel execution: threads vs. asyncio vs. subprocess pool
 
@@ -393,11 +392,16 @@ controlled); a preventive layer reduces how often that check has to catch someth
 avoiding a wasted retry/rollback cycle for a confinement failure that could have been
 prevented instead of just detected.
 
-**Status: Assumed.** Whether Claude Code's CLI actually exposes reliable
-directory/tool-restriction flags is unverified this session. *Validate:* check
-`claude -p --help`/current docs during the real-executor spike (P0); if no such flags
-exist or they're unreliable, fall back to post-check-only, which is still fully
-requirement-compliant on its own.
+**Status: Refined, still partially Assumed** (P0 spike,
+`docs/spikes/claude-p-feasibility.md`). `--add-dir` alone gives **no** real
+boundary — a live test wrote to an absolute path outside it without any denial.
+`--restricted --add-dir <workspace> --allowedTools <list>` did block the same write,
+but the observed refusal looked like model judgment (declined in text, before
+attempting the tool call; `permission_denials` stayed empty), not an observed hard
+technical denial — one sample, not proof of a guaranteed block. Recommendation
+updated to use `--restricted`, not bare `--add-dir`, as the preventive layer; the
+mandatory post-stage diff+hash check (C6, DECIDED) remains the actual enforcement
+point, unchanged, exactly as this section originally anticipated.
 
 ### O-7. Policy expression: Python classes vs. declarative rules
 
@@ -508,10 +512,11 @@ engine/executor boundary clean (CLAUDE.md: "agents sit behind an executor interf
 the executor interface needs only `execute(profile, inputs) -> response`, with zero
 Claude-Code-specific filesystem side effects.
 
-**Status: Assumed.** Depends on `claude -p`'s actual system-prompt-injection and
-tool/directory-restriction flags — same underlying uncertainty as O-6. *Validate:*
-together with O-6, in the same spike (P0), before building the full profile-rendering
-system.
+**Status: Verified at the mechanism level** (P0 spike,
+`docs/spikes/claude-p-feasibility.md`). `--append-system-prompt` was accepted without
+error across every live call. Whether persona text measurably changes model behavior
+wasn't isolated (would need an A/B comparison) — that's ordinary prompt iteration
+during T4.2, not a CLI-feasibility blocker, so it isn't re-flagged as Assumed.
 
 ---
 
