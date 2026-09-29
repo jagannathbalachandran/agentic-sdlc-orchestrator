@@ -630,3 +630,60 @@ checkout.
   projects.json` (outside this repo, not committed here).
 - T5.3 (scenario REQ text) is next and depends on this task.
 
+## T5.3 — Scenario REQ text (B-1 + G-16)
+
+**What changed:** three `.orchestrator/scenarios/*.toml` files, one per
+requirements.md §12 row, written into the two target repos from T5.2 (files
+live outside this repo, not committed here):
+- `shortener-greenfield-by-agents/.orchestrator/scenarios/greenfield.toml` —
+  `req_id = "REQ-1"`, no `base_ref` (workspace built fresh from the T5.1
+  template, never cloned). `requirement_text` broadens §12's bare "Shorten,
+  redirect, 404 for unknown codes" per architecture-proposal.md B-1, explicitly
+  adding all three reliability behaviors B-1 names: reject malformed input
+  with a clear 4xx (not a crash/500); unknown code → 404 (not an exception);
+  generated codes must never collide.
+- `url-shortener-brownfield-target/.orchestrator/scenarios/brownfield.toml` —
+  `req_id = "REQ-1"`, `base_ref = "baseline-greenfield"`, `inject_fault =
+  true` (G-16's flag — the orchestrator itself writes one failing acceptance
+  test immediately before S6's first attempt, forcing the S6→S5a retry loop
+  on demand rather than depending on a real agent happening to fail).
+  `requirement_text` = "Add click analytics" per §12, fleshed out from
+  `url-shortener-brownfield-target`'s own `docs/requirements.md` (a
+  pre-existing human-authored doc found already in the copied repo) —
+  FR-1..FR-4 already exist there for the greenfield features; FR-5/FR-6 are
+  explicitly earmarked "Brownfield" for exactly "record each redirect as a
+  click" / "stats per link: total clicks, clicks per day, top referrers", so
+  this REQ text continues that numbering rather than inventing new scope. Also
+  carried over that doc's non-functional constraint that recording a click
+  must never slow the redirect hot path, and its privacy constraint (no raw
+  IPs stored).
+- `url-shortener-brownfield-target/.orchestrator/scenarios/ambiguous.toml` —
+  `req_id = "REQ-2"`, `base_ref = "baseline-greenfield"` (independent of the
+  brownfield scenario — same base tag, not chained after it), `inject_fault`
+  left at its default `false` (G-16 is brownfield-only; this scenario
+  demonstrates blocking questions and design rejection instead, not the
+  S6→S5a retry). `requirement_text` = exactly `"Links should expire."` per
+  §12 — deliberately **not** fleshed out: that same `docs/requirements.md`'s
+  Q-6 explicitly says expiry behaviour (who sets it, the expired-link
+  response, the default) is "resolved in the ambiguous scenario" — i.e. by
+  S1 raising `blocking_questions` into the Clarification checkpoint (T7.4),
+  not by this REQ text pre-deciding it. Over-specifying it would defeat the
+  scenario's purpose.
+
+**Covered:** B-1, G-16, §12.
+
+**Verification (DoD):** ran the real `orchestrator validate` CLI (not a mock
+or a test stub) against all three, using T5.2's actual registered project
+names and the orchestrator's own `config/defaults.toml` — all three printed
+`OK`. Explicitly checked the greenfield REQ text against B-1's three named
+reliability behaviors by grepping for each: malformed-input rejection ✓,
+404-not-crash ✓, collision-avoidance ✓ — all three present verbatim.
+
+**Deferred / assumed:**
+- No orchestrator source changed; scenario files live in the two external
+  target repos (the user commits/pushes them there, per T5.2's ownership
+  pattern).
+- `url-shortener-brownfield-target`'s own `docs/requirements.md` (copied over
+  from A1) was read for grounding only — not modified, and not something this
+  orchestrator repo depends on or references at runtime.
+
