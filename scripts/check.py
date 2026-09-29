@@ -11,6 +11,11 @@ import sys
 
 Gate = tuple[str, list[str]]
 
+# Matches requirements.md C15 and pyproject.toml's [tool.coverage.report] fail_under;
+# passed explicitly (not left to pytest-cov's implicit config pickup) per the same
+# never-trust-implicit-config principle requirements.md §7.4 states for target gates.
+COVERAGE_THRESHOLD_PERCENT = 85
+
 GATES: list[Gate] = [
     ("ruff check", [sys.executable, "-m", "ruff", "check", "."]),
     ("ruff format --check", [sys.executable, "-m", "ruff", "format", "--check", "."]),
@@ -26,7 +31,15 @@ GATES: list[Gate] = [
             "scripts",
         ],
     ),
-    ("pytest", [sys.executable, "-m", "pytest"]),
+    (
+        "pytest",
+        [
+            sys.executable,
+            "-m",
+            "pytest",
+            f"--cov-fail-under={COVERAGE_THRESHOLD_PERCENT}",
+        ],
+    ),
     ("pip-audit", [sys.executable, "-m", "pip_audit"]),
 ]
 
