@@ -3,14 +3,11 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "orchestrator"
+name = "service"
 version = "0.1.0"
-description = "Agentic SDLC orchestrator with governed, auditable execution"
+description = "Greenfield service scaffold — orchestrator-approved template"
 requires-python = ">=3.11"
-dependencies = [
-    "pydantic>=2.9.0,<3.0.0",
-    "pydantic-settings>=2.5.0",
-]
+dependencies = []
 
 [project.optional-dependencies]
 dev = [
@@ -21,18 +18,11 @@ dev = [
     "pip-audit>=2.7.0",
 ]
 
-[project.scripts]
-orchestrator = "orchestrator.cli.main:main"
-
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.ruff]
 target-version = "py311"
-# templates/python-service/ ships its own pyproject.toml + [tool.ruff] and is a
-# separate deliverable artifact (copied whole into target workspaces, T5.1) —
-# not orchestrator's own source, so it isn't held to this config.
-extend-exclude = ["templates/"]
 
 [tool.ruff.lint]
 extend-select = ["B", "S", "C90", "PLR0912", "PLR0913", "PLR0915"]
@@ -54,10 +44,10 @@ python_version = "3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "--cov=orchestrator --cov-report=term-missing"
+addopts = "--cov=service --cov-report=term-missing"
 
 [tool.coverage.run]
-source = ["orchestrator"]
+source = ["service"]
 
 [tool.coverage.report]
 fail_under = 85

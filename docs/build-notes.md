@@ -520,3 +520,58 @@ Bash pattern; every other role asserts no `Bash` anywhere in `enabled_tools` or
   T10's real showcase runs, same as O-10 flagged in the P0 spike — this task only
   needed the tool-scoping and schema DoD, not final prompt tuning.
 
+## T5.1 — Greenfield template
+
+**What changed:** `templates/python-service/` — a minimal, generic scaffold that
+`workspace/manager.py`'s `init_greenfield_workspace()` (T2.2) copies wholesale
+before `git init` + the setup commit. Contains: `pyproject.toml` (packaging +
+dev deps + the same ruff/mypy/pytest/coverage config shape as the orchestrator's
+own), `scripts/check.py` (the identical 5-gate runner — ruff check, ruff format
+--check, mypy --strict, pytest+coverage at 85%, pip-audit), `.github/workflows/
+ci.yml` (least-privilege `permissions: contents: read`, pinned actions,
+`timeout-minutes`), `src/service/__init__.py` + `tests/unit/test_smoke.py` (a
+trivial versioned module + smoke test — needed so a *fresh, uncustomized* copy
+already passes its own gates: an empty test suite would exit pytest 5 "no tests
+collected", not 0), `tests/acceptance/` (empty, ready for S5b), `.orchestrator/
+project.toml` (an example `ProjectConfig`), `README.md`, `.gitignore`.
+
+**Isolation from the orchestrator's own gates:** added `extend-exclude =
+["templates/"]` to the root `pyproject.toml`'s `[tool.ruff]` — without it,
+`ruff check .` (run from the orchestrator's own `scripts/check.py`) would
+recurse into the template and lint it against the *orchestrator's* rules even
+though the template ships its own separate `pyproject.toml`/`[tool.ruff]`
+(ruff's nearest-config resolution would likely have isolated it anyway, but the
+explicit exclude removes any doubt). `mypy --strict` was already scoped to
+`src tests scripts` so it never touched `templates/` in the first place;
+`pytest`'s `testpaths = ["tests"]` never collects `templates/python-service/
+tests/` either.
+
+**Covered:** §12 setup, C3-AC2.
+
+**Tests:** `tests/unit/templates/test_python_service_template.py` (new, 5
+tests) — asserts every expected scaffold file exists; `.orchestrator/
+project.toml` validates against `orchestrator.config.schema.ProjectConfig`
+(reusing `config/loader.py`'s `load_project_config`, T1.2); the CI workflow
+pins actions and sets `permissions`/`timeout-minutes`; `scripts/check.py`
+declares the same 5 gates as the orchestrator's own. Full gate: 164 tests,
+96.45% coverage.
+
+**Live verification (DoD's "copying the template and running its own
+CI-equivalent quality gates locally succeeds on a fresh copy" — a real `pip
+install` into a throwaway venv, not part of the pytest suite, same category as
+T4.1's live tests):** copied `templates/python-service/` to a scratch sibling
+directory, created a fresh venv, ran `pip install -e ".[dev]"` (succeeded,
+`service 0.1.0` installed editable), then `python scripts/check.py` — all 5
+gates passed cleanly: 1 test passed, 100% coverage (85% required), no
+vulnerabilities found. Confirms a target repo built from this template is
+gate-green *before* any orchestrator run even starts.
+
+**Deferred / assumed:**
+- The scaffold's `src/service/` module and its smoke test are meant to be
+  extended/replaced by S5a's real implementation tasks, not treated as
+  permanent application code.
+- `.orchestrator/project.toml` here is the template's own illustrative example
+  (`project_name = "python-service"`); T5.2 writes the *real* target repos'
+  `.orchestrator/project.toml` once those repos exist (human-owned task, not
+  this one).
+

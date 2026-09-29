@@ -1,0 +1,5 @@
+# Example .orchestrator/project.toml — orchestrator.config.schema.ProjectConfig.
+# Replace project_name and approved_dependencies for the actual target repo;
+# scenario definitions live separately under .orchestrator/scenarios/*.toml.
+project_name = "python-service"
+approved_dependencies = []
