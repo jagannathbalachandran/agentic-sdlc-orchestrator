@@ -411,3 +411,72 @@ independently passing all gates before either commit.
   exactly T7.1's job; this change only makes the *absence* of retry logic
   safe under looping (stop, don't spin) rather than leaving it unsafe.
 
+## T4.1 — Profile rendering + real executor
+
+**What changed:** `models/profile.py` (`AgentProfile`, TOML-shaped, plus
+`DEFAULT_ALLOWED_TOOL_PATTERNS = ("Write", "Edit", "Read")`), `profiles/loader.py`
+(`load_profile`: reads + validates a profile TOML, returns `LoadedProfile` with a
+sha256 `version_hash` of the raw bytes for traceability), `profiles/render.py`
+(`render_system_prompt`, `render_tools_flag`, `render_allowed_tools_flag`), and
+`executors/real.py` (`RealExecutor`, the `Executor` implementation backed by real
+`claude -p` subprocess calls). Profile is loaded **by name per call**
+(`request.profile_name`), not bound at construction, since one `RealExecutor`
+instance serves an entire `drive()` loop spanning multiple stages/profiles.
+Per-call timeout kills the **whole process tree** (Windows `taskkill /T /F`;
+POSIX `os.killpg` + `SIGKILL`, via `CREATE_NEW_PROCESS_GROUP`/`start_new_session`
+at `Popen` time), not just the direct child (ADR-001, hard-stop-(a) follow-up).
+Workspace venv's `Scripts`/`bin` dir is prepended to the subprocess `PATH` so bare
+`python` resolves to the workspace's own interpreter — matching how a shell
+`activate` script behaves, and what the developer/test-engineer profiles' scoped
+`Bash(python -m pytest *)` pattern (item 4, T4.2) is written against.
+
+**Covered:** O-4 (small JSON execution summary, deliverables via tools), O-6
+(`--restricted` + `--add-dir` + `--allowedTools`), O-10 (`--append-system-prompt`
+persona injection), ADR-001's process-tree-kill decision.
+
+**Unit tests:** `tests/unit/models/test_profile.py` (3), `tests/unit/profiles/
+test_loader.py` (5), `tests/unit/profiles/test_render.py` (6),
+`tests/unit/executors/test_real.py` (9, via a patched `subprocess.Popen` stand-in —
+timeout→`TIMEOUT`, malformed inner JSON→`INVALID_OUTPUT`, malformed outer
+envelope→`INVALID_OUTPUT`, well-formed→`SUCCESS` with every field asserted,
+`is_error`→`ERROR`, plus direct tests of `_venv_bin_dir`/`_build_env`/
+`_build_command` with and without an enabled-tools profile). Full gate: 144
+tests, 96.45% coverage.
+
+**Live tests (DoD requirement, not part of the pytest suite — need a real `claude`
+install + network + API budget; run manually from a scratch script, not committed):**
+- **Live smoke call:** `RealExecutor.execute()` against a throwaway greenfield
+  workspace with a real analyst-shaped profile, prompting it to write
+  `01-requirements.md` (one FR + one AC) and reply with the JSON summary contract.
+  Result: `outcome=SUCCESS`, `01-requirements.md` landed with the expected content,
+  `produced_ids=('FR-1',)`, `files_written=('01-requirements.md',)`, summary parsed
+  cleanly, cost ≈ $0.033, ~11s.
+- **Live timeout test:** same call shape with `timeout_seconds=1` (deliberately
+  impossible). `communicate()` raised `TimeoutExpired` as expected;
+  `_kill_process_tree` was called; the direct child's PID was confirmed gone from
+  the OS process table (`Get-Process -Id <pid>` empty) immediately after, and no
+  file appeared in the workspace even after waiting 15s for a possible late write
+  from a surviving grandchild process. Full process-tree termination confirmed.
+
+**Finding (significant, not previously known):** the first smoke-test attempt used
+a workspace under the OS temp/scratchpad directory and got `outcome=INVALID_OUTPUT`
+with an empty workspace. Raw stdout showed why: `claude -p`'s own permission system
+flagged the temp path itself as suspicious and silently blocked the `Write` calls
+(`permission_denials` populated; the model's `result` text explained it couldn't
+get past "a permission gate flagging the temp/scratchpad path as suspicious") —
+this happened *regardless* of `--add-dir`, `--allowedTools Write`, and
+`--permission-mode acceptEdits` all being set correctly. Re-running against an
+ordinary (non-temp) project directory succeeded immediately. **Consequence:** real
+orchestrator workspaces must live under ordinary project directories (which they
+already do — `orch_home`/project paths are never OS temp), never under a system
+temp directory; documented here so this isn't rediscovered by surprise once T5.2's
+real target repos are wired up.
+
+**Deferred / assumed:**
+- `--max-turns` doesn't exist (confirmed again, consistent with the P0 spike);
+  `--max-budget-usd` + the subprocess timeout remain the only caps.
+- No retry/backoff on `TIMEOUT`/`ERROR`/`INVALID_OUTPUT` outcomes yet — that's
+  T7.1's job; `RealExecutor` only reports the outcome faithfully.
+- pip-audit gate correctly skips auditing this project's own package
+  (`orchestrator` isn't on PyPI) — pre-existing gate behavior, not new here.
+
