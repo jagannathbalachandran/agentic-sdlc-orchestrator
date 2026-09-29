@@ -24,6 +24,11 @@ pip install -e ".[dev]"
 
 ## Running the gates
 
+**`pip install -e ".[dev]"` (see Setup above) must be run first.** In a fresh venv
+without it, `pytest` cannot import the `orchestrator` package the tests exercise —
+`scripts/check.py` fails at the pytest gate during test collection, before any test
+actually runs.
+
 ```
 python scripts/check.py
 ```
