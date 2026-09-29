@@ -28,3 +28,41 @@ entry per task from `docs/tasks.md`, in build order.
   `timeout` instead. Flagged for review at hard stop (a).
 - `architecture-proposal.md`'s O-4/O-6/O-10 status paragraphs updated in place to
   point at the spike doc.
+
+**Hard-stop-(a) review follow-ups (same Task: P0):**
+- ADR-001 + T4.2: developer/test-engineer profiles get a scoped Bash limited to
+  running pytest (named via `--tools` under `--restricted`); every other role gets
+  no Bash.
+- ADR-001 + T4.1: per-call timeout now kills the whole process tree (Windows:
+  `taskkill /T /F`; POSIX: own process group), not just the direct child. T4.1's DoD
+  gained a live timeout test.
+- Spike doc + a new `docs/spikes/spike_results.redacted.json` had the local username
+  redacted to `<user>` before committing.
+- architecture-proposal.md §4.3 gained two more limitations: central audit-repo
+  publishing (already SHOULD per requirements rev 2 D-20, not a new trim) and
+  workspace confinement's CLI flags not being a hard boundary (ADR-001). T12.3's DoD
+  now also requires every SHOULD/COULD item from requirements.md §2.
+
+## T1.1 — Domain models
+
+**What changed:** added `src/orchestrator/models/` with `_patterns.py` (shared ID
+regexes) and `run.py`, `graph.py`, `traceability.py`, `decisions.py`, `approvals.py`,
+`events.py`, `agent_io.py` — pydantic models for every run-record artifact
+(`docs/requirements.md` §11) plus the stage-graph and agent-call shapes
+(`docs/architecture-proposal.md` §3.3). 30 unit tests under `tests/unit/models/`,
+one file per model module: minimal-valid-input, required-field, and ID-format
+invalid-input cases for each. 100% coverage on the new code.
+
+**Covered:** C2-AC2 (scenario snapshot/hash shape); groundwork for C5 (schema gate)
+and C12-AC1 (event structure).
+
+**Deferred / assumed:**
+- Config schema models (defaults/project/scenario) intentionally live in `config/
+  schema.py` (T1.2), not here — `architecture-proposal.md` §3.1's module tree already
+  separates them from `models/`; T1.1's own file list agrees, only its prose summary
+  was loosely worded.
+- Timestamps are required fields everywhere (no `default_factory=datetime.now`
+  inside any model) — keeps domain models pure per CLAUDE.md; the caller (engine/
+  audit layer) is responsible for stamping the time, once a clock is injected there.
+- `Event.injected` is a first-class field (not buried in `payload`) specifically so
+  G-16's fault-injection events are trivially queryable.
