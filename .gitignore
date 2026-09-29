@@ -216,3 +216,21 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+
+# PyCharm
+.idea/
+
+# Local SQLite database files
+*.db
+*.sqlite3
+
+# Local env overrides (keep the example)
+.env.*
+!.env.example
+
+# Ruff cache
+.ruff_cache/
+
+# Target-repo clones created by orchestrator runs
+workspaces/
