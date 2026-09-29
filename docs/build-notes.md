@@ -575,3 +575,58 @@ gate-green *before* any orchestrator run even starts.
   `.orchestrator/project.toml` once those repos exist (human-owned task, not
   this one).
 
+## T5.2 — Target repo prep
+
+**Ownership:** repo creation, the `url-shortener-brownfield-target` copy of A1,
+and pushing the `baseline-greenfield` tag were all done by the user (human-owned
+per the task split). Claude's part: author `.orchestrator/project.toml` in each,
+register both, and check the Postgres question — no repo creation/copying/
+pushing.
+
+**What changed:**
+- `shortener-greenfield-by-agents` (empty, local
+  `C:\Users\Prathibha\projects\shortener-greenfield-by-agents`, remote
+  `github.com/jagannathbalachandran/shortener-greenfield-by-agents`): added
+  `.orchestrator/project.toml` — `project_name = "shortener-greenfield-by-agents"`,
+  `approved_dependencies = []` (greenfield builds fresh from the T5.1 template,
+  not this repo's history; the stack is decided during Design/Plan, any new
+  dependency goes through Change-control, C6/T6.2).
+- `url-shortener-brownfield-target` (copy of A1 with A1's remote removed, tag
+  `baseline-greenfield` at `976f316` "T-04: redirect, link details, 404 for
+  unknown codes", local
+  `C:\Users\Prathibha\projects\url-shortener-brownfield-target`, remote
+  `github.com/jagannathbalachandran/url-shortener-brownfield-target`): added
+  `.orchestrator/project.toml` — `project_name =
+  "url-shortener-brownfield-target"`, `approved_dependencies` listing the 7
+  production deps already in `pyproject.toml` at that tag (`fastapi`,
+  `pydantic`, `pydantic-settings`, `uvicorn`, `sqlalchemy`, `alembic`,
+  `psycopg`) — pre-approved since they predate any orchestrator run; a new one
+  the agents add later still needs Change-control approval.
+- Both registered via the real `orchestrator register` CLI against the default
+  `ORCH_HOME` (`~/.orchestrator` — confirmed **not** an OS temp path, consistent
+  with T4.1's finding; `cli/main.py:default_orch_home()` resolves to
+  `Path.home() / ".orchestrator"` unless `$ORCH_HOME` overrides it). Verified
+  both resolve via `registry.resolve_project`.
+
+**Postgres finding (checked against `url-shortener-brownfield-target`, not
+A1):** checked out the `baseline-greenfield` tag, unset `DATABASE_URL`, and ran
+its `scripts/check.py` with its own `.venv` — **all gates passed without a
+running Postgres instance**: 80 tests passed, 97.67% coverage (85% required),
+ruff/mypy/pip-audit clean. Confirmed by reading `tests/conftest.py`:
+`_database_url()` falls back to a throwaway `tmp_path` SQLite file (migrated to
+head via Alembic) whenever `DATABASE_URL` is unset; `docker-compose.yml`'s
+Postgres service is explicitly for "optional manual runs" only (its own
+comment), never required by the test suite. **Mitigation:** none needed — the
+orchestrator's real executor never sets `DATABASE_URL`, so agent-run test
+gates against this project will use the same SQLite fallback by default.
+Repo was returned to `main` (its state before this check) after the tag
+checkout.
+
+**Covered:** §12, C3-AC4.
+
+**Deferred / assumed:**
+- No orchestrator source changed in this task; only files written into the two
+  external target repos plus the registry entry at `~/.orchestrator/
+  projects.json` (outside this repo, not committed here).
+- T5.3 (scenario REQ text) is next and depends on this task.
+
