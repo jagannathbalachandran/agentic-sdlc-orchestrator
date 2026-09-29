@@ -174,8 +174,11 @@ response parsing per the revised O-4 (agent writes files via its own tools; resp
 **Dependencies:** P0 (spike findings must inform the flags used here), T1.4, T3.2.
 **DoD:** unit tests against a patched/fake subprocess covering: call exceeds
 timeout → outcome `timeout`; malformed summary → retryable-error outcome; well-formed
-summary → parsed `AgentCallResponse`. (An actual live `claude -p` call is exercised in
-T10, not here.) `scripts/check.py` green.
+summary → parsed `AgentCallResponse`. Plus one **live smoke call**: run S1 for real
+(`claude -p`) against a throwaway greenfield workspace, confirm `01-requirements.md`
+lands at the expected path and the JSON summary parses; record the command, exit code,
+and outcome in `docs/build-notes.md`. (Full three-scenario real execution is still
+T10.) `scripts/check.py` green.
 
 ### T4.2 Agent profiles (7 roles)
 **Goal:** author `agents/profiles/*.toml` for analyst, architect, planner, developer,
@@ -200,27 +203,42 @@ green.
 **DoD:** copying the template and running its own CI-equivalent quality gates locally
 succeeds on a fresh copy; `scripts/check.py` green (orchestrator's own).
 
-### T5.2 Target repo prep
-**Goal:** create the empty `shortener-greenfield-by-agents` repo (only
-`.orchestrator/`); add `.orchestrator/` to A1 (`url-shortener-ai-assisted`); tag
-`baseline-greenfield` on A1; check whether A1's own test suite needs a running Postgres
-instance and record the finding + chosen mitigation.
+### T5.2 Target repo prep — human-owned repo creation; Claude authors `.orchestrator/` only
+**Goal:** two target repos exist and are registered: (1) `shortener-greenfield-by-agents`
+— empty, only `.orchestrator/`; (2) `url-shortener-brownfield-target` — a **copy** of A1
+(`url-shortener-ai-assisted`), tagged `baseline-greenfield`, used for both the brownfield
+and ambiguous scenarios. **A1 itself is never modified, cloned into, or pushed to** —
+the copy is a separate repo the user creates.
 **Traces to:** §12, C3-AC4.
-**Files/modules:** none under `src/orchestrator/` — real GitHub/git operations;
-`.orchestrator/project.toml` authored in both target repos.
+**Ownership:** creating both repos, producing the `url-shortener-brownfield-target` copy
+of A1, and pushing the `baseline-greenfield` tag are **human-owned** — the user does
+these. Claude's part is limited to authoring `.orchestrator/project.toml` in each repo
+(once it exists), registering both projects via `orchestrator register`, and checking
+whether `url-shortener-brownfield-target`'s test suite needs a running Postgres instance.
+**Files/modules:** `.orchestrator/project.toml` authored in both target repos; no repo
+creation, forking, copying, or pushing by Claude.
 **Dependencies:** T5.1.
-**DoD:** both target repos reachable via `orchestrator register`; the Postgres finding
-and its mitigation (or confirmation none is needed) recorded in `docs/build-notes.md`.
+**DoD:** both target repos reachable via `orchestrator register`; `.orchestrator/
+project.toml` present and valid in each; the Postgres finding (checked against
+`url-shortener-brownfield-target`, not A1) and its mitigation recorded in
+`docs/build-notes.md`.
+**Stop condition:** pause and tell the user as soon as this task needs the repos to
+exist (i.e. before anything that needs their URLs) — do not attempt to create, copy, or
+tag them.
 
 ### T5.3 Scenario REQ text (B-1 + G-16)
-**Goal:** author the three scenarios' REQ text — greenfield broadened per B-1 (reject
-malformed input, unknown code → 404, avoid code collisions); brownfield carrying the
-fault-injection flag (G-16); ambiguous ("Links should expire").
+**Goal:** author the three scenarios' REQ text — greenfield (project
+`shortener-greenfield-by-agents`) broadened per B-1 (reject malformed input, unknown
+code → 404, avoid code collisions); brownfield (project `url-shortener-brownfield-target`)
+carrying the fault-injection flag (G-16); ambiguous (same project, "Links should
+expire").
 **Traces to:** B-1, G-16, §12.
-**Files/modules:** `.orchestrator/scenarios/*.toml` in the two target repos.
+**Files/modules:** `.orchestrator/scenarios/*.toml` in `shortener-greenfield-by-agents`
+and `url-shortener-brownfield-target`.
 **Dependencies:** T5.2.
-**DoD:** `orchestrator validate` passes for each scenario file; greenfield REQ text
-checked against B-1's three reliability behaviors explicitly.
+**DoD:** `orchestrator validate` passes for each scenario file, project names matching
+T5.2's repos; greenfield REQ text checked against B-1's three reliability behaviors
+explicitly.
 
 ---
 
@@ -327,12 +345,14 @@ failure/retry/success sequence) and asserting the known success-rate/MTTR values
 ## T9 — Coverage / gap-filling pass
 
 **Goal:** close any coverage gaps left by T1–T8's incremental tests so the orchestrator's
-own code reaches ≥85% coverage.
+own code reaches the 85% threshold — the same figure C15 states, `pyproject.toml`'s
+`[tool.coverage.report] fail_under` sets, and `scripts/check.py` enforces explicitly via
+`--cov-fail-under=85`.
 **Traces to:** C15-AC1/AC2.
 **Files/modules:** `tests/` — wherever `pytest --cov` reports gaps.
 **Dependencies:** rolling; run after T8 as a dedicated pass.
-**DoD:** `scripts/check.py`'s pytest gate reports ≥85% coverage; ruff, mypy --strict,
-and pip-audit all green.
+**DoD:** `scripts/check.py`'s pytest gate passes at the enforced 85% threshold; ruff,
+mypy --strict, and pip-audit all green.
 
 **— Hard stop (c): before T10, the showcase runs. Review before continuing. —**
 
@@ -354,10 +374,10 @@ after it.
 fixtures derived and redacted per O-8; `docs/build-notes.md` entry written.
 
 ### T10.2 Brownfield showcase
-**Goal:** real-executor run of the brownfield scenario against A1 at
-`baseline-greenfield`; exercises the baseline check, impact analysis, FR-numbering
-continuation, migration → Change-control approval, and the fault-injected S6→S5a retry
-(G-16).
+**Goal:** real-executor run of the brownfield scenario against
+`url-shortener-brownfield-target` at `baseline-greenfield` (never against A1 itself);
+exercises the baseline check, impact analysis, FR-numbering continuation, migration →
+Change-control approval, and the fault-injected S6→S5a retry (G-16).
 **Traces to:** §12 brownfield row, C3-AC4, C6 (schema change control), C9 (retry).
 **Files/modules:** `evidence/runs/<run-id>/**`.
 **Dependencies:** T10.1 (pipeline proven once before repeating for real).
@@ -366,8 +386,9 @@ retry loop exercised with an `injected: true` event visible in `events.jsonl`; r
 record committed.
 
 ### T10.3 Ambiguous showcase
-**Goal:** real-executor run of the ambiguous scenario ("Links should expire");
-exercises blocking questions → Clarification → answer, and Design rejection → re-plan.
+**Goal:** real-executor run of the ambiguous scenario ("Links should expire") against
+`url-shortener-brownfield-target` at `baseline-greenfield`; exercises blocking
+questions → Clarification → answer, and Design rejection → re-plan.
 **Traces to:** §12 ambiguous row, C7 (clarification), C11 (re-planning).
 **Files/modules:** `evidence/runs/<run-id>/**`.
 **Dependencies:** T10.1.
