@@ -170,7 +170,13 @@ the **whole process tree** on expiry (Windows: `taskkill /T /F` against the chil
 PID; POSIX: child launched in its own process group, group signaled), not just the
 direct child (ADR-001); JSON-summary response parsing per the revised O-4 (agent
 writes files via its own tools; response is `{summary, produced_ids,
-files_written}`).
+files_written}`). **Also responsible for making `python` resolve to the workspace's
+own venv inside the `claude -p` subprocess** — prepend the workspace venv's
+`Scripts`/`bin` directory to that subprocess's `PATH` (the same effect a shell
+`activate` script has), so a Bash call the agent makes as plain `python -m pytest`
+runs the workspace's interpreter, not the orchestrator's own or a system one. This
+is what T4.2's scoped Bash pattern is written against — see the consistency note
+there.
 **Traces to:** C8-AC1–AC5, C9-AC5.
 **Files/modules:** `src/orchestrator/executors/real.py`; `src/orchestrator/profiles/
 {loader.py, render.py}`.
@@ -191,12 +197,20 @@ three-scenario real execution is still T10.) `scripts/check.py` green.
 test engineer, technical writer, reviewer — each instructing tool-based writes + a
 small JSON summary per O-4. Developer and test-engineer profiles get a scoped Bash
 limited to running pytest, named via `--tools` under `--restricted` (ADR-001); every
-other profile gets no Bash at all.
+other profile gets no Bash at all. **Consistency fix:** the scoped pattern is
+**`Bash(python -m pytest *)`**, not `Bash(pytest *)` — this repo's own
+`scripts/check.py` already runs `sys.executable -m pytest`, never bare `pytest`, and
+target repos follow the same convention (assumption A-2); a bare `Bash(pytest *)`
+rule would never match what the profile actually instructs the agent to type, so the
+scoped Bash would silently never fire. The developer/test-engineer profile prompts
+must explicitly instruct `python -m pytest ...` (not a `.venv`-relative interpreter
+path, not bare `pytest`) so the command the agent types matches this pattern exactly
+— T4.1 makes plain `python` resolve to the workspace's own venv for that call.
 **Traces to:** C8-AC2/AC6.
 **Files/modules:** `agents/profiles/*.toml`.
 **Dependencies:** T4.1.
 **DoD:** each profile validates against the profile schema from T1.1; developer and
-test-engineer profiles assert a `Bash(pytest *)`-scoped tool allowlist, and every
+test-engineer profiles assert a `Bash(python -m pytest *)`-scoped tool allowlist, and every
 other profile asserts no Bash entry present; `scripts/check.py` green.
 
 ---

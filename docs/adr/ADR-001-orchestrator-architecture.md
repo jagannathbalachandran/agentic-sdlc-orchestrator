@@ -78,9 +78,12 @@ not stop at a mock-only skeleton.
 - **Bash is role-scoped, not blanket-available.** Under `--restricted`, Bash and
   other code-execution tools are removed by default unless named via `--tools`.
   **Developer and test-engineer profiles get Bash re-enabled, scoped to running
-  pytest only** (named via `--tools` under `--restricted`, allowlisted narrowly, e.g.
-  `Bash(pytest *)`); every other role (analyst, architect, planner, technical writer,
-  reviewer) gets no Bash at all. This is a least-privilege narrowing on top of the
+  pytest only** (named via `--tools` under `--restricted`, allowlisted narrowly as
+  `Bash(python -m pytest *)` — not bare `Bash(pytest *)`, which would never match
+  since this repo's own `scripts/check.py` and target repos alike invoke tests via
+  `python -m pytest`, never bare `pytest`); every other role (analyst, architect,
+  planner, technical writer, reviewer) gets no Bash at all. This is a
+  least-privilege narrowing on top of the
   confinement above, not a substitute for it — the post-stage diff check still
   enforces file confinement regardless of which tools a call used.
 - **Profiles render into a system prompt + CLI flags**, not Claude Code
