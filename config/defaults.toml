@@ -1,0 +1,38 @@
+# Global stage-graph/gate/policy configuration (requirements.md §8, §9).
+# Phase 1: this is the only config layer — project/scenario hardening (tighten-only)
+# is designed but not built (§9, COULD).
+
+coverage_threshold_percent = 85
+
+[limits]
+# Defaults per architecture-proposal.md gap G-6.
+max_run_duration_minutes = 180
+max_agent_calls = 60
+per_call_timeout_seconds = 600
+diff_size_limit_lines = 400
+diff_size_limit_files = 15
+
+[retry_limits]
+invalid_output_max_attempts = 2
+s6_failure_max_attempts = 3
+s7b_findings_max_attempts = 2
+
+[policy]
+protected_path_globs = [
+    ".github/**",
+    "scripts/check.py",
+    ".orchestrator/**",
+    "docs/requirements/*/00-source.md",
+    ".env*",
+    "*.pem",
+    "id_rsa*",
+    "*.key",
+]
+# In-house regex set (architecture-proposal.md G-7): narrower than a dedicated
+# scanner, documented as a limitation, not silently assumed thoroughness.
+secret_scan_patterns = [
+    "AKIA[0-9A-Z]{16}",
+    "(?i)api[_-]?key\\s*[:=]\\s*['\"][A-Za-z0-9_\\-]{16,}['\"]",
+    "(?i)secret\\s*[:=]\\s*['\"][A-Za-z0-9_\\-]{16,}['\"]",
+    "-----BEGIN [A-Z ]*PRIVATE KEY-----",
+]

@@ -66,3 +66,31 @@ and C12-AC1 (event structure).
   audit layer) is responsible for stamping the time, once a clock is injected there.
 - `Event.injected` is a first-class field (not buried in `payload`) specifically so
   G-16's fault-injection events are trivially queryable.
+
+## T1.2 — Config loader + `validate` (schema errors only)
+
+**What changed:** `src/orchestrator/config/{schema,loader,validate}.py`,
+`src/orchestrator/exceptions.py` (`ConfigValidationError`,
+`ProjectNotRegisteredError`), `src/orchestrator/cli/commands/validate.py`, and the
+top-level `config/defaults.toml` with real Phase-1 default values (coverage 85%;
+G-6's limits: 180min run duration, 60 agent calls, 600s per-call timeout, 400-line/
+15-file diff-size limit; the 3 retry counts from C9; protected-path globs and
+in-house secret-scan regexes for G-4/G-5/G-7). 13 new tests across
+`tests/unit/config/` and `tests/unit/cli/commands/`. 100% coverage.
+
+**Covered:** C1-AC1 (schema errors reported before any run — literal scope, no
+hardening-merge logic); C2-AC1/AC3 (unregistered-project and invalid-config runs are
+rejected).
+
+**Deferred / assumed:**
+- `ProjectLookup` is an injected `Callable[[str], str | None]`, not a call into the
+  real file-backed registry — the registry itself is T2.2's job. Tests use stub
+  lookups; T2.3 wires the real one in. This keeps `config/validate.py` free of a
+  forward dependency on a module that doesn't exist yet.
+- `cli/commands/validate.py` takes explicit `--defaults`/`--project-config`/
+  `--scenario-config` paths rather than resolving them from `ORCH_HOME`/a cloned
+  target repo — that resolution logic belongs to the workspace manager (T2.2) and
+  the CLI entry point (T2.3), not to this command in isolation.
+- `config/defaults.toml`'s `secret_scan_patterns` and `protected_path_globs` are
+  real, usable defaults, but the *policy classes* that consume them (T6.2) don't
+  exist yet — this task only had to get the config schema and values right.
