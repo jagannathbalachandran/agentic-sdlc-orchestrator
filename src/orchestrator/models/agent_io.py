@@ -22,10 +22,18 @@ class AgentCallOutcome(StrEnum):
 
 
 class AgentCallRequest(BaseModel):
-    """What the executor needs to make one agent call."""
+    """What the executor needs to make one agent call.
+
+    `scenario_id` and `attempt` key mock-fixture lookup (O-8, `(scenario_id,
+    stage_id, attempt)`) and are equally useful for the real executor's own
+    logging/correlation, so they live on the shared request rather than being
+    mock-only parameters.
+    """
 
     profile_name: str
+    scenario_id: str
     stage: str
+    attempt: int = 1
     task_id: str | None = None
     rendered_prompt: str
     workspace_path: str

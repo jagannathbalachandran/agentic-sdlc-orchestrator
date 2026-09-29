@@ -120,3 +120,26 @@ editing a field after the fact, and removing a whole event, both flip `verify()`
   covers the property DoD asks for (original file never corrupted) without
   depending on OS-specific fault injection.
 
+## T1.4 — Executor protocol + mock executor
+
+**What changed:** `src/orchestrator/executors/{base,mock}.py`; a generic fallback
+fixture at `fixtures/mock/_generic/S1.json`. `AgentCallRequest` (T1.1) gained
+`scenario_id: str` and `attempt: int = 1` — needed for O-8's `(scenario_id, stage,
+attempt)` fixture key, and equally useful for the real executor's own
+logging/correlation later, so they live on the shared request rather than being
+mock-only. 9 new tests. 98.67% overall coverage (`executors/base.py` is a pure
+`Protocol`, never executed — its 0% is expected, not a gap).
+
+**Covered:** C8-AC1 (engine depends only on the `Executor` protocol); C1-AC3
+(`--mock` can run without Claude or the network — the executor itself makes no
+network calls); groundwork for §13's mock-required-for-tests NFR.
+
+**Deferred / assumed:**
+- Fixture filename lookup tries `<stage>-<attempt>.json` first, then (attempt 1
+  only) bare `<stage>.json` — matches architecture-proposal.md O-8's
+  `<stage>[-<attempt>].json` notation, read as "the attempt suffix is optional for
+  the first attempt."
+- Only one generic fallback fixture exists so far (S1). More stages get generic
+  fixtures if/when a later task's tests need the mock executor to succeed for them
+  without a real scenario fixture; not front-loaded speculatively.
+

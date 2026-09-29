@@ -17,6 +17,7 @@ from orchestrator.models.agent_io import (
 def test_agent_call_request_accepts_minimal_valid_input(tmp_path: Path) -> None:
     request = AgentCallRequest(
         profile_name="analyst",
+        scenario_id="shorten-greenfield",
         stage="S1",
         rendered_prompt="Derive FRs from the requirement.",
         workspace_path=str(tmp_path),
@@ -24,6 +25,7 @@ def test_agent_call_request_accepts_minimal_valid_input(tmp_path: Path) -> None:
         budget_usd=0.5,
     )
     assert request.task_id is None
+    assert request.attempt == 1
 
 
 def test_agent_call_response_defaults_are_empty_not_none() -> None:

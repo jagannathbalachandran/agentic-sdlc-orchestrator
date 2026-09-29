@@ -1,0 +1,8 @@
+{
+  "summary": "Generic fallback: derived FR-1 with one acceptance criterion.",
+  "produced_ids": ["FR-1"],
+  "files_written": ["01-requirements.md"],
+  "files": {
+    "01-requirements.md": "# Requirements\n\n## FR-1\nGeneric placeholder requirement.\n\n### FR-1.AC1\nGeneric placeholder acceptance criterion.\n"
+  }
+}
