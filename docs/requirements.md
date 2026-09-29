@@ -5,6 +5,13 @@ Status markers:
 - **[OPEN]** — for the architecture proposal: options, trade-offs, recommendation.
 - Priority: **MUST** (Phase 1 — built first) · **SHOULD** (Phase 2 — if time allows) · **COULD** (documented as next step).
 
+### Revision history
+
+| Rev | Date | Change |
+|---|---|---|
+| 1 | 2026-09-28 | Initial requirements |
+| 2 | 2026-09-29 | Automatic publishing to the central audit repo moved **MUST → SHOULD** (time budget; the local hash-chained run record and committed evidence keep audit-grade traceability in Phase 1). Showcase runs use the real executor; mock fixtures derived from them (O-8 decided, D-21). Per-agent-call timeout added (C9). Submission-level deliverables added to §19. C11 note mapping rejection-driven re-planning to upstream-change re-planning. |
+
 ---
 
 ## 1. What we are building
@@ -43,8 +50,8 @@ and must be complete and working before anything in Phase 2 starts.**
 
 | Phase | Scope |
 |---|---|
-| **Phase 1 — MUST** | Every capability item marked MUST in §10: stage graph with conditional S2 and parallel joins; gates incl. tests + coverage ≥ 85%; core policies; four approval checkpoints with pause/resume via commands; bounded retries, rollback, fallback to human, safe-stop; rejection-driven re-planning; requirement-folder traceability + per-task commits with trailers; decision lineage; hash-chained event log, report, PR description, metrics; **automatic publishing of run records to the central audit repo (§11.1)**; real + mock executors; agent profiles; push after release approval; the three scenarios run and recorded |
-| **Phase 2 — SHOULD** | Automatic re-publish of records that failed to publish; audit-record check in the target's CI; per-tool enforcement per agent role; resume after process kill mid-stage; `status` with merged detection |
+| **Phase 1 — MUST** | Every capability item marked MUST in §10: stage graph with conditional S2 and parallel joins; gates incl. tests + coverage ≥ 85%; core policies; four approval checkpoints with pause/resume via commands; bounded retries, rollback, fallback to human, safe-stop; rejection-driven re-planning; requirement-folder traceability + per-task commits with trailers; decision lineage; hash-chained event log, report, PR description, metrics; real + mock executors; agent profiles; push after release approval; the three scenarios run with the real executor and recorded |
+| **Phase 2 — SHOULD** | **Automatic publishing of run records to the central audit repo (§11.1)**, including re-publish of records that failed to publish and the audit-repo link in the PR description; audit-record check in the target's CI; per-tool enforcement per agent role; resume after process kill mid-stage; `status` with merged detection |
 | **COULD (documented only)** | **Project-level hardening** of global rules (extra gates, protected paths, approvals, higher thresholds, tighter limits — §9); stale-branch detection; automatic PR creation; central thresholds via a reusable CI workflow; central runner deployment; git-worktree isolation for parallel stages; OpenTelemetry export |
 
 Anything not built is listed in the final engineering summary as a limitation, with the design already described here.
@@ -105,7 +112,7 @@ Anything not built is listed in the final engineering summary as a limitation, w
 | Agent manipulated by content in the repo (prompt injection) | Enforcement lives outside agents; repo content treated as data | Orchestrator (local) |
 | Honest mistakes in project config/scenarios | Schema validation before the run | Orchestrator (local) |
 | Operator modifies the orchestrator or global rules locally | **Merge-time enforcement**: target CI re-runs the gates on GitHub; branch protection blocks merge on failure. **Tamper evidence**: orchestrator version + effective-config hash recorded and shown in the PR | GitHub (cannot be bypassed locally) + audit record |
-| Run records lost, edited or never looked at | Hash-chained event log; **automatic publishing to the central audit repo**; audit link in every PR (all MUST) | Orchestrator + central audit repo |
+| Run records lost, edited or never looked at | Hash-chained event log (MUST); **automatic publishing to the central audit repo** and audit link in every PR (SHOULD, §11.1) | Orchestrator + central audit repo |
 
 **Principle:** local runs give fast, governed feedback; **the merge gate enforces**. Nothing
 reaches `main` without passing CI on GitHub, regardless of what happened locally.
@@ -150,7 +157,7 @@ Both `failed` and `stopped` leave the branch at the last good commit, record the
 - **Only the orchestrator commits and pushes**; it pushes only the run branch, only after Release approval.
 - **The engineer raises the PR** into `main`, using the generated `pr-description.md`
   (summary, requirement → FR → task coverage, approvals, gate results, orchestrator version,
-  config hash, link to the run record).
+  config hash, reference to the run record).
 - **The approver reviews and merges.** The orchestrator never merges.
 - **Latest-`main` compatibility** is ensured in GitHub: PR CI tests the **merge result** with
   current `main`; branch protection requires the CI check and "branches up to date before
@@ -443,10 +450,12 @@ persona, responsibilities and limits, allowed tools (least privilege), inputs, o
 - Fallback: exhausted retries → pause for the human with full context (intervene, re-plan, or end as `failed`).
 - Rollback: reset to the last good commit.
 - Safe-stop: `stop` command, max duration, max agent calls, critical violation.
+- Per-agent-call timeout: a call exceeding it is terminated; a timeout counts as a failed attempt and follows the same retry limits.
 - AC1 Retry limits never exceeded (tested).
 - AC2 After rollback, the workspace equals the last good commit.
 - AC3 Safe-stop leaves no partial commit; `stopped` recorded with trigger.
 - AC4 (SHOULD) After a process kill, `resume` continues from the last completed stage.
+- AC5 A call exceeding its timeout is terminated and recorded with outcome `timeout`; no partial commit.
 
 ### C10. Traceability and decision lineage — MUST
 - Requirement folder (§7.2); per-task commits with trailers; decisions with depends-on links.
@@ -458,19 +467,22 @@ persona, responsibilities and limits, allowed tools (least privilege), inputs, o
 - AC6 Each decision records ID, stage, actor, choice, rationale, depends-on (decision IDs + artifact hashes).
 
 ### C11. Re-planning — MUST (rejection-driven) · SHOULD (other triggers)
+Rejection-driven re-planning is the Phase 1 instance of re-planning when upstream outputs
+change: a changed S3 output invalidates S4 onwards, which is re-planned under the same gates
+and approvals.
 - AC1 Rejecting the design with feedback re-runs S3 with the feedback, then S4 onwards; S1/S2 kept.
 - AC2 Downstream stages are marked `invalidated`; events record the trigger.
 - AC3 Re-planned output passes the same gates and approvals.
 
-### C12. Observability and audit — MUST
+### C12. Observability and audit — MUST (central audit-repo publishing: SHOULD)
 - Append-only, **hash-chained** `events.jsonl` with correlation IDs (run, stage, attempt, agent call).
 - `run.json` records orchestrator version and **effective-config hash**; both appear in `pr-description.md`.
 - Live terminal progress; `report.md`; `pr-description.md`.
 - AC1 Every transition, gate, policy result, approval, retry, rollback, stop is an event.
 - AC2 Editing or deleting an event is detected by chain verification.
 - AC3 No secrets written to any record (redaction tested).
-- AC4 Run records are published automatically to the central audit repo (§11.1) at every approval pause and at the end of every run, whatever the outcome.
-- AC5 `pr-description.md` contains the link to the run's folder in the audit repo.
+- AC4 (SHOULD) Run records are published automatically to the central audit repo (§11.1) at every approval pause and at the end of every run, whatever the outcome.
+- AC5 `pr-description.md` identifies the run record (run ID and record location); (SHOULD) it links to the run's folder in the audit repo.
 
 ### C13. Metrics — MUST
 Run success rate; stage first-pass rate; retry and rollback frequency; MTTR (failure → next
@@ -522,7 +534,12 @@ success of that stage); end-to-end latency with and without human wait; stage an
 
 ---
 
-### 11.1 Central audit store [DECIDED]
+### 11.1 Central audit store [DECIDED — design · SHOULD — build]
+
+**Phase 1:** run records stay in `ORCH_HOME/runs/`, protected by the hash-chained event log;
+the three showcase run records are committed to `evidence/runs/` in the orchestrator repo.
+Automatic publishing below is **SHOULD** (Phase 2); if not built, it is listed as a
+limitation in the final engineering summary.
 
 Run records must not live only on one engineer's laptop. The orchestrator **publishes them
 automatically** — no manual step — to a central audit repo.
@@ -542,7 +559,7 @@ automatically** — no manual step — to a central audit repo.
 - **Visible in normal review:** `pr-description.md` links to the run's folder in the audit
   repo, so every PR reviewer sees the audit trail as part of the review.
 - **If publishing fails** (e.g. no network): the run is not blocked; the record is marked
-  `unpublished` in `index.jsonl` and the next orchestrator command retries (retry: SHOULD).
+  `unpublished` in `index.jsonl` and the next orchestrator command retries.
 - **Limitation (documented):** pushes use the engineer's git credentials, so a determined
   operator could still push misleading records — the hash chain makes this detectable, not
   impossible. **Production path:** write-once object storage (e.g. S3 Object Lock) or an audit
@@ -556,7 +573,9 @@ automatically** — no manual step — to a central audit repo.
 | Brownfield | `url-shortener-ai-assisted` | Tag `baseline-greenfield` | Add click analytics | Baseline check; impact analysis; FR numbering continues; architecture updated; migration → change-control approval; retry after a gate failure |
 | Ambiguous | `url-shortener-ai-assisted` | Tag `baseline-greenfield` | "Links should expire" | Blocking questions → clarification → answers in lineage; design rejection → re-plan |
 
-Showcase run records are copied to `evidence/runs/` in the orchestrator repo.
+Showcase runs use the **real executor** (`claude -p`); their run records are committed to
+`evidence/runs/` in the orchestrator repo. The mock executor replays fixtures derived from
+these runs, so reviewers without Claude can run all three scenarios with `run --mock`.
 
 ---
 
@@ -607,7 +626,8 @@ one active run per project; deploying the target service; cost computation.
 | D-17 | Local CLI for the prototype; central runner as production path |
 | D-18 | One active run per project (lock) |
 | D-19 | Phase 1 = all MUST items, built and working before Phase 2 |
-| D-20 | Run records published automatically to a central audit repo at every approval pause and at run end; linked from every PR |
+| D-20 | Central audit repo design as in §11.1; automatic publishing is **SHOULD** (Phase 2). Phase 1 relies on the local hash-chained record plus showcase records committed to `evidence/runs/` |
+| D-21 | Showcase runs use the real executor; mock fixtures are derived from those real runs (resolves O-8) |
 
 ---
 
@@ -622,7 +642,7 @@ one active run per project; deploying the target service; cost computation.
 | O-5 | Parallel execution: threads vs asyncio vs subprocess pool |
 | O-6 | Workspace confinement for `claude -p`: tool/dir restrictions vs post-stage checks vs both |
 | O-7 | Policy expression: Python policy classes vs declarative rules |
-| O-8 | Mock fixtures: recorded from real runs vs hand-written |
+| O-8 | ~~Mock fixtures: recorded from real runs vs hand-written~~ — **decided (D-21)**: derived from real runs; remaining detail (fixture format, redaction) in the architecture proposal |
 | O-9 | Module layout of `src/orchestrator/` |
 | O-10 | Applying profiles to `claude -p`: rendered system prompt + flags vs Claude Code subagent/skill files |
 
@@ -638,9 +658,9 @@ one active run per project; deploying the target service; cost computation.
 | Agent oversteps paths or weakens gates | Path partitioning, protected paths, orchestrator-enforced thresholds |
 | Operator bypasses local rules | Merge-time CI enforcement; tamper evidence |
 | Parallel contract mismatch | S3 contracts; bounded S5a loop |
-| Runaway time/cost | Timeouts, max calls, max duration, safe-stop |
-| Per-task execution makes runs slow | Mock mode for iteration; real runs only for showcase |
-| Scope larger than time | Phase 1 first; everything else documented |
+| Runaway time/cost | Per-call timeouts, max calls, max duration, safe-stop |
+| Per-task execution makes runs slow | Mock mode for iteration; real runs only for showcase, started early |
+| Scope larger than time | Phase 1 first; central audit publishing moved to SHOULD; everything else documented |
 
 ---
 
@@ -661,4 +681,7 @@ one active run per project; deploying the target service; cost computation.
 | Production-quality outputs, tests, docs | S5a/S5b/S7a + S6 gate; C15 |
 | Controlled autonomy | Stage boundaries, profiles, approvals, policies |
 | Safe change management | §6.3, C6, §5.2 |
-| Three scenarios | §12 |
+| Three scenarios | §12 (real-executor runs; records in `evidence/runs/`) |
+| Final engineering summary (plan/rationale, artifacts, risks/trade-offs/validation, assumptions, limitations) | `docs/engineering-summary.md` |
+| Architecture overview (components, orchestration model, control flow, key decisions) | `docs/architecture.md` + ADRs |
+| Setup instructions; testing approach, limitations and trade-offs | `README.md`; `docs/engineering-summary.md` |
