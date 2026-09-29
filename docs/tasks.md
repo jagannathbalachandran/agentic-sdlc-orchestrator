@@ -265,18 +265,33 @@ git_ops.py` (serialization lock).
 real (`tmp_path`) git repo, asserting both file sets land and both commits succeed
 without index corruption (closes O-5's validation step); `scripts/check.py` green.
 
-### T6.2 Policies (7 of 8 — dependency control descoped)
+### T6.2 Policies (7 of 8 — dependency control descoped) + Change-control checkpoint
 **Goal:** implement workspace confinement, path partitioning, protected paths
 (section-aware per G-4/G-5), main protection, secret scan (in-house regex, G-7), schema
 change control, and diff-size limit. Dependency control is designed but not built this
-slice (limitation).
-**Traces to:** C6-AC1/AC2 for these 7.
+slice (limitation). **Owns wiring the Change-control approval checkpoint** — the
+natural home for it, since both trigger conditions (schema change control, diff-size
+limit) are policies built in this same task. **Architectural note:** unlike Design/
+Release, Change-control is *conditional* (C7), and `StageSpec.checkpoint_after` is a
+static field set once at graph-definition time — it can't express "pause only if this
+run's diff is risky." S6 needs a small extension to `_run_one_stage`'s (or an
+S6-specific hook's) post-policy logic: after S6's policies run, if either flags the
+diff, set `graph_state.pending_checkpoint = ApprovalCheckpointKind.CHANGE_CONTROL`
+directly (bypassing `spec.checkpoint_after`, which stays `None` on S6's `StageSpec`) —
+the same mechanism T7.4 needs for Clarification's conditional trigger, so build the
+"dynamic pending_checkpoint override" as a small shared primitive both tasks call, not
+duplicated logic.
+**Traces to:** C6-AC1/AC2 for the 7 policies; C7 (Change-control checkpoint).
 **Files/modules:** `src/orchestrator/policies/{base.py, workspace_confinement.py,
 path_partitioning.py, protected_paths.py, main_protection.py, secret_scan.py,
-schema_change_control.py, diff_size_limit.py}`.
+schema_change_control.py, diff_size_limit.py}`; `src/orchestrator/stages/s6_verify.py`
+(post-policy conditional pending_checkpoint); `src/orchestrator/engine/fsm.py` (the
+shared dynamic-checkpoint primitive).
 **Dependencies:** T6.1.
 **DoD:** each policy has its own test proving detection and the specified outcome
-(C6-AC1, literal requirement, so this is 7 separate tests minimum); `scripts/check.py`
+(C6-AC1, literal requirement, so this is 7 separate tests minimum); **plus** a test
+where a schema-change-control (or diff-size-limit) violation on S6's diff sets
+`pending_checkpoint = CHANGE_CONTROL` and a clean diff does not; `scripts/check.py`
 green.
 
 ---
@@ -320,6 +335,36 @@ hook); `src/orchestrator/audit/event_log.py` (injected flag).
 **DoD:** test: scenario with the fault-injection flag set → S6 attempt 1 fails
 deterministically on the injected test → `events.jsonl` shows `injected: true` on that
 event → attempt 2 (after the S5a-fix call) passes; `scripts/check.py` green.
+
+### T7.4 Clarification checkpoint (blocking questions → pause → `answer` re-runs S1)
+**Goal:** **Owns wiring the Clarification approval checkpoint** — placed here, not
+T4.1, because resuming it means *re-running S1 with the answers incorporated*, which
+is structurally the same re-planning shape T7.2 already builds for Design rejection
+(re-run a stage, keep what's upstream, mark downstream invalidated), not executor/
+profile work. Depends on T4.1 existing first, since detecting "blocking questions"
+needs S1's real output shape (the analyst profile's JSON summary carries a
+`blocking_questions: list[str]` field when it has any). After S1 passes, if
+`blocking_questions` is non-empty, use T6.2's shared dynamic-checkpoint primitive to
+set `graph_state.pending_checkpoint = ApprovalCheckpointKind.CLARIFICATION` (S1's
+`StageSpec.checkpoint_after` stays `None`, same reasoning as Change-control's
+conditional trigger). `answer`'s decision and comment (the human's answers) are
+recorded in `decisions.jsonl` as part of the run's decision lineage (C10-AC6), not
+just `approvals.jsonl` — then S1 re-runs with the answers available to the analyst
+profile as additional context.
+**Traces to:** C7 (Clarification checkpoint); C10-AC6 (answers recorded in decision
+lineage). **T10.3 (the ambiguous showcase) depends on this task** — it's the scenario
+that exercises blocking questions → Clarification → answer.
+**Files/modules:** `src/orchestrator/engine/replanning.py` (extend — the S1 re-run
+path); `src/orchestrator/stages/s1_requirements.py` (conditional pending_checkpoint,
+mirroring S6's change in T6.2); `src/orchestrator/audit/` (decision-lineage write on
+`answer`).
+**Dependencies:** T4.1 (real S1 output shape), T7.2 (shares the re-run-a-stage
+mechanism), T6.2 (shares the dynamic-checkpoint primitive).
+**DoD:** test: S1's output carries `blocking_questions` → run pauses with
+`pending_checkpoint = CLARIFICATION` → `answer` records the answer in
+`decisions.jsonl` → S1 re-runs (with the answers passed to the profile) → downstream
+proceeds normally; a second test confirms S1 output with no blocking questions never
+pauses; `scripts/check.py` green.
 
 ---
 
@@ -400,7 +445,9 @@ record committed.
 questions → Clarification → answer, and Design rejection → re-plan.
 **Traces to:** §12 ambiguous row, C7 (clarification), C11 (re-planning).
 **Files/modules:** `evidence/runs/<run-id>/**`.
-**Dependencies:** T10.1.
+**Dependencies:** T10.1, **T7.4** (Clarification checkpoint — without it, S1's
+blocking questions never pause the run, and this scenario's core demonstration
+doesn't happen).
 **DoD:** run reaches `completed`; the clarification answer is recorded in decision
 lineage; Design rejection triggers re-planning per C11-AC1; run record committed.
 
