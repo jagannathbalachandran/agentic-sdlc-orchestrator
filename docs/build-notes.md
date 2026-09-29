@@ -143,3 +143,37 @@ network calls); groundwork for §13's mock-required-for-tests NFR.
   fixtures if/when a later task's tests need the mock executor to succeed for them
   without a real scenario fixture; not front-loaded speculatively.
 
+## T2.1 — `StageSpec` + minimal static graph (S0, S1) + `StageRunner`
+
+**What changed:** `src/orchestrator/gates/base.py` (`StageContext`, the `Gate`
+Protocol); `src/orchestrator/engine/graph.py` (`GRAPH` with S0/S1 only, `T3.2`
+extends to all 9); `src/orchestrator/engine/runner.py` (`StageRunner`:
+entry gates → execute → exit gates → event → commit hook). Added a generic
+`fixtures/mock/_generic/S0.json`. 11 new tests. 99.81% overall coverage
+(`executors/mock.py` line 80, a defensive branch for a malformed `files` field,
+stays uncovered — not chased, well above the 85% bar).
+
+**Covered:** C4-AC1 (no stage starts before its dependencies pass — `GRAPH`
+declares `S1.depends_on == (S0,)`); C4-AC4 (graph lookup rejects unknown stages,
+tested via `get_stage_spec` raising `KeyError` for `S2`, not yet defined).
+
+**Deferred / assumed:**
+- **Policy enforcement is not stubbed in `StageRunner`.** `Policy.check` needs a
+  `WorkspaceDiff` type that doesn't exist until T6.1/T6.2 builds the confinement
+  diff mechanism — adding a placeholder `Policy` hook now would mean redesigning
+  its signature later anyway, so the "policy (stub)" step from T2.1's own
+  description is deferred structurally, not half-built. Noted explicitly since the
+  task text mentioned it.
+- **The commit step is a no-op hook** (`no_op_commit`, injectable via
+  `commit_hook`) until `workspace/git_ops.py` exists (T2.2 for the mechanism,
+  T6.1 for the real commit-with-trailers logic).
+- **S0 is real-graph orchestrator-only** (no agent call, per requirements.md §7's
+  stage table — "S0 Prepare | Orchestrator"). T2.1's test still drives S0 through
+  `StageRunner` against the mock executor to prove the generic entry→execute→exit→
+  event mechanism stage-agnostically; T2.2/T2.3 will special-case S0 to skip the
+  executor call and do real workspace setup instead.
+- `StageRunner.__init__`/`run()` take a single `StageGates`/`StageRunRequest`
+  argument respectively (not individual params) to stay under the project's
+  5-argument limit (PLR0913) — small bundling refactor, same pattern as T1.3's
+  `EventDraft`.
+

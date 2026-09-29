@@ -1,0 +1,8 @@
+{
+  "summary": "Generic fallback: workspace prepared.",
+  "produced_ids": [],
+  "files_written": ["00-source.md"],
+  "files": {
+    "00-source.md": "Generic placeholder baselined requirement text.\n"
+  }
+}
