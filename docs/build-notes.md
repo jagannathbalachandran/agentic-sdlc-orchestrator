@@ -177,3 +177,33 @@ tested via `get_stage_spec` raising `KeyError` for `S2`, not yet defined).
   5-argument limit (PLR0913) — small bundling refactor, same pattern as T1.3's
   `EventDraft`.
 
+## T2.2 — Workspace manager
+
+**What changed:** `src/orchestrator/workspace/{git_ops,manager}.py`;
+`src/orchestrator/registry.py` (top-level, matching architecture-proposal.md
+§3.1's module tree — it's platform-wide state, not workspace-scoped); added
+`GitCommandError` to `exceptions.py`. `registry.resolve_project` is the real
+file-backed implementation of the `ProjectLookup` shape `config/validate.py` (T1.2)
+was already written against — T2.3 wires it in. 16 new tests. 99.51% overall
+coverage (`registry.py` lines 36-37, the corrupt-registry-file fallback, untested
+directly but exercised structurally by the missing-file case).
+
+**Covered:** C1 (`register` command backing); C3-AC1/AC2/AC3 (greenfield
+init records `base_ref=None` with the setup commit as `base_commit`; existing-repo
+clone records the real `base_ref` and its resolved commit — both per G-12's
+resolution; run branch created via `create_run_branch`, matching D-5's
+`run/<run-id>` naming).
+
+**Deferred / assumed:**
+- **Venv creation (C3-AC3's "target deps installed in the workspace venv only")
+  is not built.** Not needed until a task actually runs a target's own gates
+  (T5.2 template prep / T10 showcase runs) — adding it now with no consumer would
+  be exactly the premature-abstraction CLAUDE.md warns against.
+- **C3-AC4 (baseline gates run first for non-greenfield) and C3-AC5 (`00-source.md`
+  written with its hash recorded) are not built here** — both belong to S0's real
+  stage logic, which is orchestrator-side work wired into the graph in T2.3/T3.2,
+  not the workspace manager's own job of "does the clone/init mechanically work."
+- `git_ops.py`'s `run_git` uses `git` resolved via `PATH` (`# noqa: S607`, matching
+  the existing `scripts/check.py` justified-noqa pattern) and a fixed literal
+  argument list per call site, never untrusted input (`# noqa: S603`).
+

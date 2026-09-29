@@ -31,3 +31,13 @@ class RunRecordError(OrchestratorError):
         super().__init__(f"{path}: {reason}")
         self.path = path
         self.reason = reason
+
+
+class GitCommandError(OrchestratorError):
+    """A git subprocess call failed."""
+
+    def __init__(self, args: tuple[str, ...], returncode: int, stderr: str) -> None:
+        super().__init__(f"git {' '.join(args)} failed ({returncode}): {stderr}")
+        self.args_ = args
+        self.returncode = returncode
+        self.stderr = stderr
