@@ -17,22 +17,6 @@ jobs:
       fail-fast: false
       matrix:
         python-version: ["3.12", "3.13"]
-    services:
-      postgres:
-        image: postgres:16-alpine
-        env:
-          POSTGRES_USER: shortener
-          POSTGRES_PASSWORD: shortener
-          POSTGRES_DB: shortener
-        ports:
-          - 5432:5432
-        options: >-
-          --health-cmd "pg_isready -U shortener"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-    env:
-      DATABASE_URL: postgresql+psycopg://shortener:shortener@localhost:5432/shortener
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5

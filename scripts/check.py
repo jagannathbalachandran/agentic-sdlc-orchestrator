@@ -24,7 +24,6 @@ GATES: list[Gate] = [
             "src",
             "tests",
             "scripts",
-            "alembic",
         ],
     ),
     ("pytest", [sys.executable, "-m", "pytest"]),

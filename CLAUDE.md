@@ -1,6 +1,13 @@
 # Project conventions for AI-assisted work
 
-- Layering: api → service → repository; no DB access or business logic in route handlers.
+- docs/requirements.md is the source of truth for the orchestrator's design; anything
+  marked DECIDED is a constraint.
+- The core engine (graph, state, gates, policies) must not depend on how agents are
+  executed; agents sit behind an executor interface (real `claude -p` and mock).
+- The orchestrator must never let an agent write outside its run workspace.
+- Every stage transition, gate result, policy result and approval is recorded in the
+  audit log.
+- Tests never call real Claude or the network; they use the mock executor.
 - Type hints everywhere; mypy strict must pass.
 - Every change ships with tests; a task is not done until `scripts/check.py` passes.
 - Stay within the task brief; do not add endpoints, dependencies or features not asked for.
