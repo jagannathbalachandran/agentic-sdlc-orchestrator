@@ -123,3 +123,7 @@ trims and task dependencies against the requirements and the brief.
 **Takeaway:** The agent's analysis was thorough on engine mechanics but
 optimised for completeness against the requirements rather than for what the
 submission is judged on. The key scope decision needed human judgement.
+
+## 2026-09-29 — ADR proposal
+
+I approved ADR-001 before the build started

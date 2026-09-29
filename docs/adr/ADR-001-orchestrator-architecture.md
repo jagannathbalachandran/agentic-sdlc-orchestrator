@@ -1,7 +1,8 @@
 # ADR-001: Orchestrator core architecture
 
-**Status:** Proposed
+**Status:** Accepted
 **Date:** 2026-09-29
+**Decider:** Jaggu (reviewed spike findings and all decisions; amendments: scoped pytest Bash for developer/test-engineer, process-tree kill on timeout)
 
 This ADR records the architectural decisions for the Phase 1 vertical slice — the
 condensed decision record. Full reasoning, trade-offs, and gap analysis live in
