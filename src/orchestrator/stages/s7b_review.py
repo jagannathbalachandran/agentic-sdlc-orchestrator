@@ -1,7 +1,7 @@
 """S7b Review — StageSpec binding (requirements.md §7).
 
-Chained after S7a for now (T3.2's "no parallel yet" scope) rather than running
-concurrently with it — T6.1's scheduler restores the real parallel-join shape.
+Depends on S6 directly, same as S7a — the two run concurrently via
+engine/scheduler.py's threaded batch runner (T6.1), joined before S8.
 """
 
 from __future__ import annotations
@@ -11,6 +11,6 @@ from orchestrator.models.graph import CommitStrategy, StageId, StageSpec
 SPEC = StageSpec(
     stage_id=StageId.S7B_REVIEW,
     owner_profile="reviewer",
-    depends_on=(StageId.S7A_DOCS,),
+    depends_on=(StageId.S6_VERIFY,),
     commit_strategy=CommitStrategy.NONE,
 )

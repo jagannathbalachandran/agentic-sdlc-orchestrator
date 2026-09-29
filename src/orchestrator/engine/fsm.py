@@ -29,7 +29,13 @@ from orchestrator.audit.event_log import EventLog
 from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
-from orchestrator.engine.runner import StageGates, StageRunner, StageRunRequest
+from orchestrator.engine.runner import (
+    StageGates,
+    StageRunner,
+    StageRunRequest,
+    stage_commit_hook,
+)
+from orchestrator.engine.scheduler import BatchResult, run_batch
 from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
 from orchestrator.executors.base import Executor
 from orchestrator.gates.base import Gate
@@ -45,6 +51,7 @@ from orchestrator.models.graph import (
     StageStatus,
 )
 from orchestrator.models.run import RunState
+from orchestrator.workspace.git_ops import init_repo
 
 GRAPH_STATE_FILENAME = "graph.json"
 EVENTS_FILENAME = "events.jsonl"
@@ -140,7 +147,15 @@ def _complete_if_all_stages_passed(graph_state: GraphState) -> None:
         graph_state.terminal_state = RunState.COMPLETED
 
 
-def _next_pending_stage(graph_state: GraphState) -> StageSpec | None:
+def _next_ready_batch(graph_state: GraphState) -> tuple[StageSpec, ...]:
+    """Every not-yet-passed stage whose dependencies are all satisfied.
+
+    Usually one stage; two when a pair of parallel siblings (S5a+S5b, S7a+S7b)
+    both become ready at once, since both depend on the same upstream stage
+    (T6.1) rather than chaining — the batch size follows purely from the
+    graph's shape, nothing here hardcodes which stages pair up.
+    """
+    ready = []
     for stage_id, spec in GRAPH.items():
         result = graph_state.stages.get(stage_id)
         if result is not None and result.status is StageStatus.PASSED:
@@ -150,8 +165,8 @@ def _next_pending_stage(graph_state: GraphState) -> StageSpec | None:
             is StageStatus.PASSED
             for dep in spec.depends_on
         ):
-            return spec
-    return None
+            ready.append(spec)
+    return tuple(ready)
 
 
 def _state_path(ref: RunRef) -> Path:
@@ -180,31 +195,41 @@ class _LoopResources:
     workspace: Path
 
 
-def _run_one_stage(
-    resources: _LoopResources, spec: StageSpec, graph_state: GraphState
-) -> StageStatus:
-    """Run one stage, record its result and (if applicable) its checkpoint pause
-    or run-completion into `graph_state`, and persist. Returns the stage's status
-    so the caller's loop knows whether to keep going."""
-    ref = resources.ref
-    runner = StageRunner(
+def _build_runner(resources: _LoopResources, spec: StageSpec) -> StageRunner:
+    return StageRunner(
         executor=resources.executor,
         event_log=resources.event_log,
         clock=lambda: datetime.now(UTC),
         gates=_gates_for(spec.stage_id),
-    )
-    result = runner.run(
-        StageRunRequest(
-            spec=spec,
-            run_id=ref.run_id,
-            scenario_id=graph_state.scenario_id,
-            workspace_path=resources.workspace,
-            rendered_prompt=f"stage {spec.stage_id.value}",
-            timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
-            budget_usd=DEFAULT_STAGE_BUDGET_USD,
-        )
+        commit_hook=stage_commit_hook,
     )
 
+
+def _build_request(
+    resources: _LoopResources, graph_state: GraphState, spec: StageSpec
+) -> StageRunRequest:
+    return StageRunRequest(
+        spec=spec,
+        run_id=resources.ref.run_id,
+        scenario_id=graph_state.scenario_id,
+        workspace_path=resources.workspace,
+        rendered_prompt=f"stage {spec.stage_id.value}",
+        timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
+        budget_usd=DEFAULT_STAGE_BUDGET_USD,
+    )
+
+
+def _record_batch_result(
+    resources: _LoopResources, graph_state: GraphState, batch_result: BatchResult
+) -> StageStatus:
+    """Record one batch member's result (and, if applicable, its checkpoint
+    pause or run-completion) into `graph_state`. Runs only on the caller's own
+    thread, after every batch member has already finished — never called
+    concurrently, so no lock is needed here (unlike the work `run_batch` fans
+    out, which does need — and gets — serialization at the EventLog/git layers).
+    """
+    spec = batch_result.spec
+    result = batch_result.result
     graph_state.stages[spec.stage_id] = StageResult(
         stage_id=spec.stage_id,
         status=result.status,
@@ -215,7 +240,7 @@ def _run_one_stage(
         graph_state.pending_checkpoint = spec.checkpoint_after
         resources.event_log.append(
             EventDraft(
-                run_id=ref.run_id,
+                run_id=resources.ref.run_id,
                 event_type=EventType.APPROVAL_REQUESTED,
                 recorded_at=datetime.now(UTC),
                 stage=spec.stage_id.value,
@@ -224,24 +249,29 @@ def _run_one_stage(
         )
     elif result.status is StageStatus.PASSED:
         _complete_if_all_stages_passed(graph_state)
-    atomic_write_json(_state_path(ref), graph_state)
     return result.status
 
 
 def drive(
     request: DriveRequest, executor: Executor, max_run_duration_seconds: float
 ) -> DriveResult:
-    """Reload state from disk; loop pending stages until paused, terminal, a
-    stage fails, or the graph is exhausted. State is persisted after every
-    single stage (not just at the end) so a process killed mid-loop leaves
-    graph.json consistent with events.jsonl, not stale.
+    """Reload state from disk; loop ready-stage batches until paused, terminal,
+    a stage fails, or the graph is exhausted. A batch is usually one stage, but
+    is two when a pair of parallel siblings (S5a+S5b, S7a+S7b) both become ready
+    at once — engine/scheduler.py runs those concurrently (T6.1). State is
+    persisted after every batch (not just at the end) so a process killed
+    mid-loop leaves graph.json consistent with events.jsonl, not stale.
     """
     ref = request.ref
     acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
     try:
         graph_state = _load_or_init_graph_state(request)
         workspace = workspace_dir(ref.orch_home, ref.project, ref.run_id)
-        workspace.mkdir(parents=True, exist_ok=True)
+        # Real clone/template-copy is S0's still-deferred real prepare logic;
+        # this just guarantees the minimum a commit-bearing stage needs — a
+        # directory that's already a git repo (idempotent: a no-op if S0's real
+        # logic already set one up here first).
+        init_repo(workspace)
         resources = _LoopResources(
             ref=ref,
             executor=executor,
@@ -256,12 +286,23 @@ def drive(
             graph_state.terminal_state is None
             and graph_state.pending_checkpoint is None
         ):
-            spec = _next_pending_stage(graph_state)
-            if spec is None:
+            batch_specs = _next_ready_batch(graph_state)
+            if not batch_specs:
                 break
-            status = _run_one_stage(resources, spec, graph_state)
-            ran_stages.append(spec.stage_id)
-            if status is not StageStatus.PASSED:
+            batch_results = run_batch(
+                batch_specs,
+                build_runner=lambda spec: _build_runner(resources, spec),
+                build_request=lambda spec: _build_request(resources, graph_state, spec),
+            )
+            statuses = [
+                _record_batch_result(resources, graph_state, batch_result)
+                for batch_result in batch_results
+            ]
+            ran_stages.extend(
+                batch_result.spec.stage_id for batch_result in batch_results
+            )
+            atomic_write_json(_state_path(ref), graph_state)
+            if any(status is not StageStatus.PASSED for status in statuses):
                 break
 
         return DriveResult(ran_stages=tuple(ran_stages), graph_state=graph_state)

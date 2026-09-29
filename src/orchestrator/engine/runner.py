@@ -3,8 +3,7 @@
 Walking-skeleton scope (T2.1): drives one stage at a time on any Executor, proven
 on S0/S1 with the mock executor. Policy enforcement is deliberately not stubbed
 here — Policy.check needs a WorkspaceDiff type that doesn't exist until T6.1/T6.2,
-so adding a placeholder now would mean redesigning it there anyway. The commit step
-is a no-op hook until workspace/git_ops.py exists (T2.2/T6.1).
+so adding a placeholder now would mean redesigning it there anyway.
 """
 
 from __future__ import annotations
@@ -23,15 +22,32 @@ from orchestrator.models.agent_io import (
     AgentCallResponse,
 )
 from orchestrator.models.events import EventDraft, EventType
-from orchestrator.models.graph import GateOutcome, StageSpec, StageStatus
+from orchestrator.models.graph import (
+    CommitStrategy,
+    GateOutcome,
+    StageSpec,
+    StageStatus,
+)
+from orchestrator.workspace.git_ops import commit_all
 
 Clock = Callable[[], datetime]
 CommitHook = Callable[[StageContext, StageSpec], "str | None"]
 
 
 def no_op_commit(_context: StageContext, _spec: StageSpec) -> str | None:
-    """Default commit hook: no-op until workspace/git_ops.py exists (T2.2/T6.1)."""
+    """A commit hook that never commits — used by tests that don't touch git."""
     return None
+
+
+def stage_commit_hook(context: StageContext, spec: StageSpec) -> str | None:
+    """Real commit hook (T6.1): one commit per stage call, unless the stage's
+    `commit_strategy` is NONE. `commit_all` serializes concurrent callers
+    internally (workspace/git_ops.py's lock), so S5a/S5b or S7a/S7b committing
+    from separate threads never race the shared working tree's index.
+    """
+    if spec.commit_strategy is CommitStrategy.NONE:
+        return None
+    return commit_all(context.workspace_path, f"{spec.stage_id.value}: stage complete")
 
 
 @dataclass(frozen=True)

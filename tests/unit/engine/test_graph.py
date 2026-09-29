@@ -13,18 +13,37 @@ def test_graph_defines_all_nine_stages() -> None:
     assert set(GRAPH.keys()) == set(StageId)
 
 
-def test_graph_chains_every_stage_to_exactly_one_predecessor_except_s0() -> None:
+def test_graph_chains_every_stage_except_the_parallel_pairs_and_joins() -> None:
     assert GRAPH[StageId.S0_PREPARE].depends_on == ()
     assert GRAPH[StageId.S1_REQUIREMENTS].depends_on == (StageId.S0_PREPARE,)
     assert GRAPH[StageId.S2_CODEBASE_ANALYSIS].depends_on == (StageId.S1_REQUIREMENTS,)
     assert GRAPH[StageId.S3_DESIGN].depends_on == (StageId.S2_CODEBASE_ANALYSIS,)
     assert GRAPH[StageId.S4_PLAN].depends_on == (StageId.S3_DESIGN,)
-    assert GRAPH[StageId.S5A_IMPLEMENT].depends_on == (StageId.S4_PLAN,)
-    assert GRAPH[StageId.S5B_ACCEPTANCE_TESTS].depends_on == (StageId.S5A_IMPLEMENT,)
-    assert GRAPH[StageId.S6_VERIFY].depends_on == (StageId.S5B_ACCEPTANCE_TESTS,)
     assert GRAPH[StageId.S7A_DOCS].depends_on == (StageId.S6_VERIFY,)
-    assert GRAPH[StageId.S7B_REVIEW].depends_on == (StageId.S7A_DOCS,)
-    assert GRAPH[StageId.S8_RELEASE].depends_on == (StageId.S7B_REVIEW,)
+
+
+def test_s5a_and_s5b_are_parallel_siblings_both_depending_only_on_s4() -> None:
+    assert GRAPH[StageId.S5A_IMPLEMENT].depends_on == (StageId.S4_PLAN,)
+    assert GRAPH[StageId.S5B_ACCEPTANCE_TESTS].depends_on == (StageId.S4_PLAN,)
+
+
+def test_s6_joins_both_s5a_and_s5b() -> None:
+    assert GRAPH[StageId.S6_VERIFY].depends_on == (
+        StageId.S5A_IMPLEMENT,
+        StageId.S5B_ACCEPTANCE_TESTS,
+    )
+
+
+def test_s7a_and_s7b_are_parallel_siblings_both_depending_only_on_s6() -> None:
+    assert GRAPH[StageId.S7A_DOCS].depends_on == (StageId.S6_VERIFY,)
+    assert GRAPH[StageId.S7B_REVIEW].depends_on == (StageId.S6_VERIFY,)
+
+
+def test_s8_joins_both_s7a_and_s7b() -> None:
+    assert GRAPH[StageId.S8_RELEASE].depends_on == (
+        StageId.S7A_DOCS,
+        StageId.S7B_REVIEW,
+    )
 
 
 def test_only_design_and_release_carry_a_checkpoint() -> None:

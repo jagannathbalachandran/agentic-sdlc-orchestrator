@@ -687,3 +687,101 @@ reliability behaviors by grepping for each: malformed-input rejection ✓,
   from A1) was read for grounding only — not modified, and not something this
   orchestrator repo depends on or references at runtime.
 
+## T6.1 — Parallel join (S5, S7)
+
+**What changed:**
+- `stages/s5b_acceptance_tests.py`: `depends_on` changed from
+  `(S5A_IMPLEMENT,)` to `(S4_PLAN,)` — S5a/S5b are now true siblings, both
+  depending only on S4, instead of chained.
+- `stages/s7b_review.py`: `depends_on` changed from `(S7A_DOCS,)` to
+  `(S6_VERIFY,)` — same shape for S7a/S7b.
+- `stages/s6_verify.py` and `stages/s8_release.py`: **also** updated (not
+  explicitly called out in the task text, but a correctness requirement of
+  making S5a/S5b and S7a/S7b real siblings) — `depends_on` changed from just
+  the "b" member to **both** members of the pair
+  (`(S5A_IMPLEMENT, S5B_ACCEPTANCE_TESTS)`, `(S7A_DOCS, S7B_REVIEW)`). Without
+  this, the join stage could start as soon as its *faster* sibling passed,
+  while the other was still running — the old single-dependency chain only
+  worked because the chain itself guaranteed both had passed by construction.
+- `engine/scheduler.py` (new): `run_batch()` — runs 1 spec directly, or 2+
+  concurrently via `ThreadPoolExecutor` (one thread per spec), joined before
+  returning. No locking here; concurrency safety lives in the callees.
+- `engine/fsm.py`: `_next_pending_stage` (single spec) replaced with
+  `_next_ready_batch` (tuple of every currently-ready spec — 1 normally, 2 for
+  a sibling pair; nothing hardcodes which stages pair up, it falls out of the
+  graph's `depends_on` shape alone). `_run_one_stage` split into
+  `_build_runner`/`_build_request` (construct a `StageRunner`/`StageRunRequest`
+  per spec) and `_record_batch_result` (post-run bookkeeping — StageResult,
+  checkpoint, completion — run only on the main thread, after the whole batch
+  joins, so no lock is needed there). `drive()`'s loop now runs a batch per
+  iteration and persists `graph.json` once per batch (not per stage within it).
+- `engine/runner.py`: added `stage_commit_hook` — **the first real commit
+  hook** (previously `no_op_commit` was the only one wired in; nothing called
+  `git_ops.commit_all` from `drive()` at all before this task). One commit per
+  stage call unless `commit_strategy` is `NONE`; message is
+  `"<stage>: stage complete"` (T8.1 owns real trailer formatting later).
+- `workspace/git_ops.py`: `commit_all` now serializes via a module-level
+  `threading.Lock` (`_COMMIT_LOCK`) so two branches' `git add -A && git commit`
+  never race the same working tree/index. Because `git add -A` is
+  workspace-wide (no per-stage path scoping without T6.2's path-partitioning
+  policy), a sibling branch's commit — run first — can already cover this
+  branch's files by the time this call acquires the lock; `commit_all` detects
+  that (`git diff --cached --quiet` after staging) and returns the current
+  HEAD instead of attempting an empty commit, which `git commit` would
+  otherwise reject. `audit/event_log.py` already had its own internal lock
+  (built ahead of this task, per its existing docstring) — nothing to change
+  there.
+- `engine/fsm.py`'s `drive()` now also calls `workspace/git_ops.init_repo()`
+  on the workspace unconditionally (idempotent — a no-op if it's already a git
+  repo) instead of just `workspace.mkdir()`. **Necessary, not just tidy:**
+  once `stage_commit_hook` makes real commits, every stage from S1 onward
+  needs the workspace to already be a git repo — and nothing currently does
+  that (S0's real prepare logic — registry lookup, template copy or clone —
+  isn't wired into `drive()`/`run.py` yet; that integration remains a real,
+  separate gap, not this task's to close). This is the minimum viable fix so
+  `drive()` doesn't crash on its very first commit, both for tests and for
+  real `--mock`/`--real` CLI usage.
+
+**Covered:** C4-AC2, §7.3; closes G-3.
+
+**Tests:**
+- `tests/unit/engine/test_graph.py`: topology assertions rewritten for the
+  sibling shape (`test_s5a_and_s5b_are_parallel_siblings_both_depending_only_on_s4`,
+  `test_s6_joins_both_s5a_and_s5b`, and the S7/S8 equivalents).
+- `tests/integration/test_parallel_scheduler.py` (new — the DoD's required
+  test): drives a real 9-stage run against a real (`tmp_path`) git repo with a
+  `MockExecutor` wrapped to inject a small artificial delay on S5a/S5b calls
+  only, recording each call's actual wall-clock interval. Asserts the two
+  intervals **overlap** (direct proof of concurrency — more robust than
+  inferring it from total elapsed time, which real git subprocess overhead
+  from S4/S7a's own commits in the same `drive()` call would swamp), both
+  file sets land (`src/placeholder.py` + `tests/unit/test_placeholder.py` from
+  S5a, `tests/acceptance/test_fr1.py` from S5b), both stages recorded a
+  commit, `git fsck` raises nothing, and `git status --porcelain` is empty
+  (fully committed, no corruption or leftover dirt).
+- 5 previously-passing `tests/unit/engine/test_fsm.py` tests that call
+  `drive()` against the real graph needed no changes in the end — they were
+  broken by the real-commit-hook change (git commands failing against a
+  non-git tmp_path) but are fixed by `drive()`'s own `init_repo()` call above,
+  not by any test-side workaround (a test-local git-init helper was written,
+  then reverted once the real fix — `init_repo()` inside `drive()` itself —
+  made it redundant).
+- Full gate: 169 tests, 96.63% coverage.
+
+**Deferred / assumed:**
+- `stage_commit_hook`'s commit messages are minimal (`"<stage>: stage
+  complete"`) — T8.1 owns real trailer formatting (`Task:`/`S5a-fix`/etc.).
+- `CommitStrategy.ONE_PER_TASK` (S5a) is still treated the same as `ONE` (one
+  commit for the whole stage call) — a real per-task loop inside S5a isn't
+  built yet; `rendered_prompt` is still the generic `f"stage {stage_id}"` from
+  T3.2's walking-skeleton scope, unchanged by this task.
+- S0's real workspace preparation (registry lookup → clone or template copy)
+  remains unwired into `drive()`/`run.py` — `init_repo()` is the minimum this
+  task needed (a real commit target), not a substitute for that real logic.
+- `git add -A`'s workspace-wide scope means two concurrent branches can
+  collapse into a single shared commit if their timing overlaps enough
+  (documented in `commit_all`'s docstring) — both branches' changes still land
+  correctly either way; T6.2's path-partitioning policy is the natural place
+  to scope each branch's `git add` to only its own allowed paths, if that
+  distinction ever matters later.
+

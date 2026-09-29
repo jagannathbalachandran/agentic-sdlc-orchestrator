@@ -1,8 +1,7 @@
 """S5b Acceptance tests — StageSpec binding (requirements.md §7).
 
-Chained after S5a for now (T3.2's "no parallel yet" scope) rather than running
-concurrently with it — T6.1's scheduler restores the real parallel-join shape
-(both depending on S4 directly).
+Depends on S4 directly, same as S5a — the two run concurrently via
+engine/scheduler.py's threaded batch runner (T6.1), joined before S6.
 """
 
 from __future__ import annotations
@@ -12,6 +11,6 @@ from orchestrator.models.graph import CommitStrategy, StageId, StageSpec
 SPEC = StageSpec(
     stage_id=StageId.S5B_ACCEPTANCE_TESTS,
     owner_profile="test_engineer",
-    depends_on=(StageId.S5A_IMPLEMENT,),
+    depends_on=(StageId.S4_PLAN,),
     commit_strategy=CommitStrategy.ONE,
 )

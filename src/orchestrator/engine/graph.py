@@ -1,9 +1,9 @@
 """The fixed Phase 1 stage graph (requirements.md §7): all nine stages, assembled
 from their StageSpec bindings in stages/.
 
-S5a→S5b and S7a→S7b are sequential dependency chains for now (T3.2's "no
-parallel yet" scope) — T6.1 makes both members of each pair depend on the same
-upstream stage and run concurrently via the scheduler instead.
+S5a/S5b both depend on S4 directly, and S7a/S7b both depend on S6 directly —
+true parallel siblings (T6.1), run concurrently via engine/scheduler.py's
+threaded batch runner rather than the T3.2-era sequential chain.
 """
 
 from __future__ import annotations

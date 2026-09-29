@@ -7,6 +7,7 @@ rollback-to-checkpoint (T7.1) will build on the same primitives.
 from __future__ import annotations
 
 import subprocess
+import threading
 from pathlib import Path
 
 from orchestrator.exceptions import GitCommandError
@@ -14,6 +15,14 @@ from orchestrator.exceptions import GitCommandError
 GIT_COMMAND_TIMEOUT_SECONDS = 30
 ORCHESTRATOR_COMMIT_AUTHOR_NAME = "orchestrator"
 ORCHESTRATOR_COMMIT_AUTHOR_EMAIL = "orchestrator@localhost"
+
+# Serializes commit_all() process-wide (T6.1, closes G-3). A single orchestrator
+# process only ever drives one run at a time, and only that run's own concurrent
+# stage branches (S5a/S5b, S7a/S7b) ever call commit_all() from multiple threads
+# at once, so one lock for the whole process is sufficient — it just stops two
+# of those branches from racing `git add -A && git commit` on the same working
+# tree/index.
+_COMMIT_LOCK = threading.Lock()
 
 
 def run_git(cwd: Path, *args: str) -> str:
@@ -46,21 +55,53 @@ def clone_repo(source: Path, dest: Path, ref: str) -> None:
     run_git(dest, "checkout", "-q", ref)
 
 
-def commit_all(path: Path, message: str) -> str:
-    """Stage everything and commit as the orchestrator; returns the new commit's SHA."""
-    run_git(path, "add", "-A")
-    run_git(
-        path,
-        "-c",
-        f"user.name={ORCHESTRATOR_COMMIT_AUTHOR_NAME}",
-        "-c",
-        f"user.email={ORCHESTRATOR_COMMIT_AUTHOR_EMAIL}",
-        "commit",
-        "-q",
-        "-m",
-        message,
+def _nothing_staged(path: Path) -> bool:
+    """True if `git add -A` staged no changes.
+
+    `git diff --cached --quiet` exits 0 for "no staged differences" and 1 for
+    "there are some" — the opposite of `run_git`'s success convention, so this
+    checks the raw return code directly instead of going through `run_git`.
+    """
+    result = subprocess.run(
+        ["git", "diff", "--cached", "--quiet"],  # noqa: S607
+        cwd=str(path),
+        capture_output=True,
+        timeout=GIT_COMMAND_TIMEOUT_SECONDS,
+        check=False,
     )
-    return current_commit(path)
+    return result.returncode == 0
+
+
+def commit_all(path: Path, message: str) -> str:
+    """Stage everything and commit as the orchestrator; returns the new commit's
+    SHA.
+
+    Serialized via `_COMMIT_LOCK` so concurrent stage branches (S5a/S5b, S7a/S7b,
+    T6.1) never race `git add -A && git commit` on the same working tree. Because
+    `git add -A` is workspace-wide (there's no per-stage path scoping yet — that's
+    T6.2's path-partitioning policy), a sibling branch's commit_all call, run
+    first, may already have staged *and committed* this branch's files too by the
+    time this one acquires the lock. That's not an error: if nothing is left to
+    stage, this returns the current HEAD (already covering this branch's changes)
+    instead of attempting an empty commit, which `git commit` would otherwise
+    reject.
+    """
+    with _COMMIT_LOCK:
+        run_git(path, "add", "-A")
+        if _nothing_staged(path):
+            return current_commit(path)
+        run_git(
+            path,
+            "-c",
+            f"user.name={ORCHESTRATOR_COMMIT_AUTHOR_NAME}",
+            "-c",
+            f"user.email={ORCHESTRATOR_COMMIT_AUTHOR_EMAIL}",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        )
+        return current_commit(path)
 
 
 def current_commit(path: Path) -> str:
