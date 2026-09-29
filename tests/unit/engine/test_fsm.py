@@ -41,12 +41,25 @@ def _request(tmp_path: Path) -> DriveRequest:
 
 def _stub_graph_with_checkpoint_after_s0() -> dict[StageId, StageSpec]:
     """A minimal graph for testing the checkpoint mechanism in isolation from
-    the real graph (which doesn't wire any checkpoints in until T3.2)."""
+    the real graph (which only checkpoints at Design/Release)."""
     return {
         StageId.S0_PREPARE: StageSpec(
             stage_id=StageId.S0_PREPARE,
             checkpoint_after=ApprovalCheckpointKind.DESIGN,
         ),
+        StageId.S1_REQUIREMENTS: StageSpec(
+            stage_id=StageId.S1_REQUIREMENTS,
+            owner_profile="analyst",
+            depends_on=(StageId.S0_PREPARE,),
+        ),
+    }
+
+
+def _stub_graph_no_checkpoint() -> dict[StageId, StageSpec]:
+    """A minimal graph with no checkpoints, to prove drive() loops through
+    multiple stages in a single call when nothing pauses it (item 7)."""
+    return {
+        StageId.S0_PREPARE: StageSpec(stage_id=StageId.S0_PREPARE),
         StageId.S1_REQUIREMENTS: StageSpec(
             stage_id=StageId.S1_REQUIREMENTS,
             owner_profile="analyst",
@@ -78,24 +91,65 @@ def test_generate_run_id_increments_the_sequence_for_existing_runs(
     assert run_id == "shorten-greenfield-20260929-002"
 
 
-def test_drive_runs_one_stage_per_call_and_reloads_state_between_calls(
+def test_drive_loops_through_multiple_stages_in_one_call_when_nothing_pauses_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Core proof for item 7: one drive() call advances every pending stage it
+    can, not just one, when nothing pauses or fails it."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_no_checkpoint())
+    request = _request(tmp_path)
+
+    result = drive(
+        request, executor=MockExecutor(FIXTURES_ROOT), max_run_duration_seconds=3600
+    )
+
+    assert result.ran_stages == (StageId.S0_PREPARE, StageId.S1_REQUIREMENTS)
+    assert result.graph_state.terminal_state is RunState.COMPLETED
+
+
+def test_drive_stops_the_loop_when_a_stage_fails_instead_of_retrying(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """No bounded-retry loop exists yet (T7.1) — drive() must stop on a stage
+    failure rather than re-attempting it forever in a tight loop."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_no_checkpoint())
+    empty_fixtures_root = tmp_path / "no-fixtures-here"
+    request = _request(tmp_path)
+
+    result = drive(
+        request,
+        executor=MockExecutor(empty_fixtures_root),
+        max_run_duration_seconds=3600,
+    )
+
+    assert result.ran_stages == (StageId.S0_PREPARE,)
+    assert result.graph_state.stages[StageId.S0_PREPARE].status is StageStatus.FAILED
+    assert StageId.S1_REQUIREMENTS not in result.graph_state.stages
+    assert result.graph_state.terminal_state is None
+
+
+def test_drive_reloads_state_between_calls_and_continues_past_a_pause(
     tmp_path: Path,
 ) -> None:
+    """The real 9-stage graph: one call loops S0-S3 and pauses at Design; a
+    second, separate drive() call (simulating a fresh process) reloads that
+    state from disk and continues from S4."""
     executor = MockExecutor(FIXTURES_ROOT)
     request = _request(tmp_path)
 
     first = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert first.ran_stage is StageId.S0_PREPARE
-
-    second = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert second.ran_stage is StageId.S1_REQUIREMENTS
-    assert second.graph_state.stages[StageId.S0_PREPARE].status is StageStatus.PASSED
-    assert (
-        second.graph_state.stages[StageId.S1_REQUIREMENTS].status is StageStatus.PASSED
+    assert first.ran_stages == (
+        StageId.S0_PREPARE,
+        StageId.S1_REQUIREMENTS,
+        StageId.S2_CODEBASE_ANALYSIS,
+        StageId.S3_DESIGN,
     )
+    assert first.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
 
-    third = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert third.ran_stage is StageId.S2_CODEBASE_ANALYSIS
+    # A fresh drive() call while still paused makes no further progress.
+    second = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert second.ran_stages == ()
+    assert second.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
 
 
 def test_drive_creates_a_fresh_workspace_and_writes_stage_files(tmp_path: Path) -> None:
@@ -118,11 +172,11 @@ def test_drive_pauses_at_a_checkpoint_and_a_later_call_makes_no_further_progress
     request = _request(tmp_path)
 
     first = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert first.ran_stage is StageId.S0_PREPARE
+    assert first.ran_stages == (StageId.S0_PREPARE,)
     assert first.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
 
     second = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert second.ran_stage is None
+    assert second.ran_stages == ()
     assert second.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
     assert StageId.S1_REQUIREMENTS not in second.graph_state.stages
 
@@ -150,9 +204,11 @@ def test_resolve_checkpoint_approve_clears_pending_records_approval_and_unblocks
     events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
     assert events[-1]["event_type"] == "approval_recorded"
 
-    # a fresh drive() call (simulating a separate process) now continues with S1
+    # a fresh drive() call (simulating a separate process) now continues with
+    # S1 — the stub graph's last stage, so this also completes the run.
     result = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert result.ran_stage is StageId.S1_REQUIREMENTS
+    assert result.ran_stages == (StageId.S1_REQUIREMENTS,)
+    assert result.graph_state.terminal_state is RunState.COMPLETED
 
 
 def test_resolve_checkpoint_reject_records_feedback_without_ending_the_run(
@@ -191,7 +247,7 @@ def test_resolve_checkpoint_reject_final_ends_the_run_as_rejected(
     assert graph_state.terminal_state is RunState.REJECTED
 
     result = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert result.ran_stage is None
+    assert result.ran_stages == ()
     assert result.graph_state.terminal_state is RunState.REJECTED
 
 
@@ -237,40 +293,37 @@ def test_stop_run_raises_if_the_run_is_already_terminal(tmp_path: Path) -> None:
 def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
     tmp_path: Path,
 ) -> None:
-    """T3.2's core DoD: drive the real (unpatched) 9-stage graph on the mock
-    executor, resolving the Design and Release checkpoints along the way, and
-    confirm the run reaches `completed` with every stage passed and every
-    stage's entry/exit gate actually exercised (recorded as gate_result events).
+    """T3.2's core DoD, updated for item 7's looping drive(): one call loops
+    S0-S3 and pauses at Design; approving it, one more call loops S4-S8 and
+    pauses at Release; approving that completes the run. Every stage's
+    entry/exit gate is exercised along the way (recorded as gate_result
+    events).
     """
     executor = MockExecutor(FIXTURES_ROOT)
     request = _request(tmp_path)
 
-    # S0, S1, S2 run without pausing (no checkpoint on any of them yet).
-    for _ in range(3):
-        result = drive(request, executor=executor, max_run_duration_seconds=3600)
-        assert result.ran_stage is not None
-
-    # S3 (Design) passes, then pauses.
-    paused_at_design = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert paused_at_design.ran_stage is StageId.S3_DESIGN
-    assert (
-        paused_at_design.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
+    to_design = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert to_design.ran_stages == (
+        StageId.S0_PREPARE,
+        StageId.S1_REQUIREMENTS,
+        StageId.S2_CODEBASE_ANALYSIS,
+        StageId.S3_DESIGN,
     )
+    assert to_design.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
 
     resolve_checkpoint(request.ref, ApprovalDecision.APPROVE, "approved", "alice", 3600)
 
-    # S4, S5a, S5b, S6, S7a, S7b run without pausing.
-    for _ in range(6):
-        result = drive(request, executor=executor, max_run_duration_seconds=3600)
-        assert result.ran_stage is not None
-
-    # S8 (Release) passes, then pauses.
-    paused_at_release = drive(request, executor=executor, max_run_duration_seconds=3600)
-    assert paused_at_release.ran_stage is StageId.S8_RELEASE
-    assert (
-        paused_at_release.graph_state.pending_checkpoint
-        is ApprovalCheckpointKind.RELEASE
+    to_release = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert to_release.ran_stages == (
+        StageId.S4_PLAN,
+        StageId.S5A_IMPLEMENT,
+        StageId.S5B_ACCEPTANCE_TESTS,
+        StageId.S6_VERIFY,
+        StageId.S7A_DOCS,
+        StageId.S7B_REVIEW,
+        StageId.S8_RELEASE,
     )
+    assert to_release.graph_state.pending_checkpoint is ApprovalCheckpointKind.RELEASE
 
     final_state = resolve_checkpoint(
         request.ref, ApprovalDecision.APPROVE, "approved", "alice", 3600
@@ -280,6 +333,10 @@ def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
         result.status is StageStatus.PASSED for result in final_state.stages.values()
     )
     assert len(final_state.stages) == len(GRAPH)
+
+    # A further call is a no-op — the run is already terminal.
+    after_completion = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert after_completion.ran_stages == ()
 
     # Every stage's entry/exit gate was exercised (recorded as gate_result events).
     events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")

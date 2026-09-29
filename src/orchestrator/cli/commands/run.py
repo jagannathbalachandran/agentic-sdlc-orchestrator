@@ -1,10 +1,10 @@
 """`orchestrator run` command: start (or, given --run-id, continue) a run.
 
-T2.3/T3.1 scope: --mock only (the real executor is T4); advances pending stages
-until it hits a checkpoint, a terminal state, or the graph is exhausted (see
-engine/fsm.py's module docstring). --run-id is primarily an internal/testing
-affordance right now — it's the same primitive approve/reject/answer reuse to
-resume a paused run.
+T2.3/T3.1/T3.2 scope: --mock only (the real executor is T4). Loops pending
+stages until it hits a checkpoint, a terminal state, or the graph is exhausted
+(see engine/fsm.py's module docstring). --run-id is primarily an internal/
+testing affordance right now — it's the same primitive approve/reject/answer
+reuse to resume a paused run.
 """
 
 from __future__ import annotations
@@ -63,14 +63,15 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
         executor=MockExecutor(FIXTURES_ROOT),
         max_run_duration_seconds=max_run_duration_seconds(),
     )
-    if result.ran_stage is not None:
-        print(f"run {run_id}: ran {result.ran_stage.value}")
-    elif (
-        result.graph_state.pending_checkpoint is None
-        and result.graph_state.terminal_state is None
+    if (
+        result.graph_state.terminal_state is not None
+        or result.graph_state.pending_checkpoint is not None
     ):
-        print(f"run {run_id}: nothing to do (graph exhausted or no ready stage)")
-    else:
         print(describe(result.graph_state))
+    elif result.ran_stages:
+        stages = ", ".join(stage.value for stage in result.ran_stages)
+        print(f"run {run_id}: ran {stages}")
+    else:
+        print(f"run {run_id}: nothing to do (graph exhausted or no ready stage)")
     print(f"run-id={run_id}")
     return 0

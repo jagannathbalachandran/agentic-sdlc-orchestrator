@@ -1,6 +1,12 @@
-"""Integration test: two separate CLI subprocess invocations proving state
-reload across a process boundary — the core proof for T2.3's pause/resume
-design (O-1/O-2, architecture-proposal.md §3.2.1).
+"""Integration test: separate CLI subprocess invocations proving state reload
+across a process boundary at a real approval checkpoint — the core proof for
+the pause/resume design (O-1/O-2, architecture-proposal.md §3.2.1).
+
+`drive()` loops through pending stages within one call (item 7 / §3.2.1 step 5),
+so `run` alone drives all the way to the first checkpoint (Design, after S3) in
+one process; a separate `approve` process reloads that state, resolves it, and
+loops again to the next checkpoint (Release, after S8); a third process
+resolves that and the run completes.
 """
 
 from __future__ import annotations
@@ -40,7 +46,12 @@ def _extract_run_id(stdout: str) -> str:
     raise AssertionError(f"no run-id line found in: {stdout!r}")
 
 
-def test_run_command_across_two_subprocesses_proves_state_reload(
+def _stage_statuses(graph_path: Path) -> dict[str, str]:
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    return {stage: entry["status"] for stage, entry in graph["stages"].items()}
+
+
+def test_run_then_approve_across_separate_processes_proves_state_reload_at_checkpoints(
     tmp_path: Path,
 ) -> None:
     orch_home = tmp_path / "orch-home"
@@ -52,44 +63,43 @@ def test_run_command_across_two_subprocesses_proves_state_reload(
     )
     assert register_result.returncode == 0, register_result.stderr
 
-    # Process 1: a fresh process runs exactly S0, then exits.
+    # Process 1: `run` loops S0-S3 in one process, pausing at Design.
     first = _run_cli(orch_home, "run", project, scenario_id, "--mock")
     assert first.returncode == 0, first.stderr
-    assert "ran S0" in first.stdout
+    assert "awaiting_approval (design)" in first.stdout
     run_id = _extract_run_id(first.stdout)
 
     graph_path = orch_home / "runs" / project / run_id / "graph.json"
-    graph_after_first = json.loads(graph_path.read_text(encoding="utf-8"))
-    assert graph_after_first["stages"]["S0"]["status"] == "passed"
-    assert "S1" not in graph_after_first["stages"]
+    statuses_after_first = _stage_statuses(graph_path)
+    for stage in ("S0", "S1", "S2", "S3"):
+        assert statuses_after_first[stage] == "passed"
+    assert "S4" not in statuses_after_first
 
     lock_path = orch_home / "locks" / f"{project}.lock"
     assert not lock_path.exists()
 
-    # Process 2: a second, separate process reloads the same run-id from disk
-    # and continues with S1 — proving the reload mechanism, not in-memory state.
-    second = _run_cli(
-        orch_home, "run", project, scenario_id, "--mock", "--run-id", run_id
-    )
+    # Process 2: a separate process reloads the same run-id from disk, resolves
+    # the Design checkpoint, and loops S4-S8, pausing at Release — proving the
+    # reload mechanism at the real pause point, not an artificial one.
+    second = _run_cli(orch_home, "approve", project, run_id, "--comment", "looks good")
     assert second.returncode == 0, second.stderr
-    assert "ran S1" in second.stdout
+    assert "awaiting_approval (release)" in second.stdout
 
-    graph_after_second = json.loads(graph_path.read_text(encoding="utf-8"))
-    assert graph_after_second["stages"]["S0"]["status"] == "passed"
-    assert graph_after_second["stages"]["S1"]["status"] == "passed"
+    statuses_after_second = _stage_statuses(graph_path)
+    for stage in ("S4", "S5a", "S5b", "S6", "S7a", "S7b", "S8"):
+        assert statuses_after_second[stage] == "passed"
     assert not lock_path.exists()
 
     workspace = orch_home / "workspaces" / project / run_id
     assert (workspace / "00-source.md").is_file()
     assert (workspace / "01-requirements.md").is_file()
 
-    # A third, separate process reloads again and continues with S2 — the graph
-    # now has all nine stages (T3.2); the full run-to-completed path (incl. the
-    # Design/Release checkpoints) is covered by the faster unit-level
-    # test_end_to_end_real_graph_reaches_completed_through_all_nine_stages in
-    # tests/unit/engine/test_fsm.py, not repeated here via subprocess.
-    third = _run_cli(
-        orch_home, "run", project, scenario_id, "--mock", "--run-id", run_id
-    )
+    # Process 3: a third, separate process reloads again, resolves Release, and
+    # the run completes.
+    third = _run_cli(orch_home, "approve", project, run_id, "--comment", "ship it")
     assert third.returncode == 0, third.stderr
-    assert "ran S2" in third.stdout
+    assert "run " + run_id + ": completed" in third.stdout
+    assert not lock_path.exists()
+
+    graph = json.loads(graph_path.read_text(encoding="utf-8"))
+    assert graph["terminal_state"] == "completed"

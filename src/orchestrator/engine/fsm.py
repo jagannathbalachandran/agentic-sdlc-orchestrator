@@ -2,9 +2,12 @@
 rebuilding all state from disk each time (architecture-proposal.md §3.2.1) —
 there is no long-running orchestrator process.
 
-`drive()` advances a run: it runs pending stages until it hits a stage whose
-`checkpoint_after` is set (pausing at `awaiting_approval`), the run reaches a
-terminal state, or the graph is exhausted. `resolve_checkpoint()` and `stop_run()`
+`drive()` advances a run: it loops through pending stages until it hits a stage
+whose `checkpoint_after` is set (pausing at `awaiting_approval`), the run reaches
+a terminal state, a stage fails (no bounded-retry loop exists yet, T7.1 — it
+stops rather than re-attempting the same stage), or the graph is exhausted
+(architecture-proposal.md §3.2.1 step 5: "Drive stages synchronously until the
+run hits a checkpoint... or fails/stops"). `resolve_checkpoint()` and `stop_run()`
 are the other half `approve`/`reject`/`answer`/`stop` call before (for approve/
 reject-without-`--final`/answer) re-entering `drive()` to continue — they take
 just a `RunRef` (no `scenario_id`), since by the time a checkpoint exists the
@@ -76,9 +79,9 @@ class DriveRequest:
 
 @dataclass(frozen=True)
 class DriveResult:
-    """What one drive() call accomplished."""
+    """What one drive() call accomplished — every stage the loop ran, in order."""
 
-    ran_stage: StageId | None
+    ran_stages: tuple[StageId, ...]
     graph_state: GraphState
 
 
@@ -167,70 +170,101 @@ def _load_existing_graph_state(ref: RunRef) -> GraphState:
     return read_json(_state_path(ref), GraphState)
 
 
+@dataclass(frozen=True)
+class _LoopResources:
+    """What every iteration of drive()'s loop needs, computed once per call."""
+
+    ref: RunRef
+    executor: Executor
+    event_log: EventLog
+    workspace: Path
+
+
+def _run_one_stage(
+    resources: _LoopResources, spec: StageSpec, graph_state: GraphState
+) -> StageStatus:
+    """Run one stage, record its result and (if applicable) its checkpoint pause
+    or run-completion into `graph_state`, and persist. Returns the stage's status
+    so the caller's loop knows whether to keep going."""
+    ref = resources.ref
+    runner = StageRunner(
+        executor=resources.executor,
+        event_log=resources.event_log,
+        clock=lambda: datetime.now(UTC),
+        gates=_gates_for(spec.stage_id),
+    )
+    result = runner.run(
+        StageRunRequest(
+            spec=spec,
+            run_id=ref.run_id,
+            scenario_id=graph_state.scenario_id,
+            workspace_path=resources.workspace,
+            rendered_prompt=f"stage {spec.stage_id.value}",
+            timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
+            budget_usd=DEFAULT_STAGE_BUDGET_USD,
+        )
+    )
+
+    graph_state.stages[spec.stage_id] = StageResult(
+        stage_id=spec.stage_id,
+        status=result.status,
+        attempts=1,
+        commits=(result.commit,) if result.commit else (),
+    )
+    if result.status is StageStatus.PASSED and spec.checkpoint_after is not None:
+        graph_state.pending_checkpoint = spec.checkpoint_after
+        resources.event_log.append(
+            EventDraft(
+                run_id=ref.run_id,
+                event_type=EventType.APPROVAL_REQUESTED,
+                recorded_at=datetime.now(UTC),
+                stage=spec.stage_id.value,
+                payload={"checkpoint": spec.checkpoint_after.value},
+            )
+        )
+    elif result.status is StageStatus.PASSED:
+        _complete_if_all_stages_passed(graph_state)
+    atomic_write_json(_state_path(ref), graph_state)
+    return result.status
+
+
 def drive(
     request: DriveRequest, executor: Executor, max_run_duration_seconds: float
 ) -> DriveResult:
-    """Reload state from disk; run the next pending stage unless paused or done."""
+    """Reload state from disk; loop pending stages until paused, terminal, a
+    stage fails, or the graph is exhausted. State is persisted after every
+    single stage (not just at the end) so a process killed mid-loop leaves
+    graph.json consistent with events.jsonl, not stale.
+    """
     ref = request.ref
     acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
     try:
         graph_state = _load_or_init_graph_state(request)
-
-        if (
-            graph_state.terminal_state is not None
-            or graph_state.pending_checkpoint is not None
-        ):
-            return DriveResult(ran_stage=None, graph_state=graph_state)
-
-        spec = _next_pending_stage(graph_state)
-        if spec is None:
-            return DriveResult(ran_stage=None, graph_state=graph_state)
-
         workspace = workspace_dir(ref.orch_home, ref.project, ref.run_id)
         workspace.mkdir(parents=True, exist_ok=True)
-        event_log = EventLog(
-            run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
-        )
-        runner = StageRunner(
+        resources = _LoopResources(
+            ref=ref,
             executor=executor,
-            event_log=event_log,
-            clock=lambda: datetime.now(UTC),
-            gates=_gates_for(spec.stage_id),
+            event_log=EventLog(
+                run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
+            ),
+            workspace=workspace,
         )
 
-        result = runner.run(
-            StageRunRequest(
-                spec=spec,
-                run_id=ref.run_id,
-                scenario_id=graph_state.scenario_id,
-                workspace_path=workspace,
-                rendered_prompt=f"stage {spec.stage_id.value}",
-                timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
-                budget_usd=DEFAULT_STAGE_BUDGET_USD,
-            )
-        )
+        ran_stages: list[StageId] = []
+        while (
+            graph_state.terminal_state is None
+            and graph_state.pending_checkpoint is None
+        ):
+            spec = _next_pending_stage(graph_state)
+            if spec is None:
+                break
+            status = _run_one_stage(resources, spec, graph_state)
+            ran_stages.append(spec.stage_id)
+            if status is not StageStatus.PASSED:
+                break
 
-        graph_state.stages[spec.stage_id] = StageResult(
-            stage_id=spec.stage_id,
-            status=result.status,
-            attempts=1,
-            commits=(result.commit,) if result.commit else (),
-        )
-        if result.status is StageStatus.PASSED and spec.checkpoint_after is not None:
-            graph_state.pending_checkpoint = spec.checkpoint_after
-            event_log.append(
-                EventDraft(
-                    run_id=ref.run_id,
-                    event_type=EventType.APPROVAL_REQUESTED,
-                    recorded_at=datetime.now(UTC),
-                    stage=spec.stage_id.value,
-                    payload={"checkpoint": spec.checkpoint_after.value},
-                )
-            )
-        else:
-            _complete_if_all_stages_passed(graph_state)
-        atomic_write_json(_state_path(ref), graph_state)
-        return DriveResult(ran_stage=spec.stage_id, graph_state=graph_state)
+        return DriveResult(ran_stages=tuple(ran_stages), graph_state=graph_state)
     finally:
         release_lock(ref.orch_home, ref.project)
 

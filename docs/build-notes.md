@@ -371,3 +371,43 @@ silently never reach `completed`.
   processes; the full 9-stage-to-completed path is unit-tested (faster, more
   precise), not repeated via subprocess.
 
+## Hard-stop-(b)-review follow-up: `drive()` loops (item 7)
+
+**What changed:** `engine/fsm.py`'s `drive()` no longer advances exactly one
+stage per call — it loops (architecture-proposal.md §3.2.1 step 5: "Drive
+stages synchronously until the run hits a checkpoint... or fails/stops"),
+persisting `graph.json` after *every* single stage (not just once at the end)
+so a process killed mid-loop leaves it consistent with `events.jsonl`, not
+stale. `DriveResult.ran_stage: StageId | None` became
+`ran_stages: tuple[StageId, ...]`. Extracted `_run_one_stage()` (one stage's
+full run-record-persist cycle) and a small `_LoopResources` bundle (ref,
+executor, event_log, workspace — computed once per `drive()` call, not
+per-stage) to keep the loop body and argument counts (PLR0913) manageable.
+**New safety property, not previously needed:** a stage that fails now stops
+the loop immediately rather than being retried — there's no bounded-retry
+logic yet (T7.1), so blindly looping on a failing stage would either spin
+forever or (with the real executor) burn real API calls in a tight loop.
+`cli/commands/run.py` updated to report every stage the loop ran, or the
+paused/terminal status if that's more relevant.
+`tests/integration/test_pause_resume.py` rewritten: `run` alone now drives
+S0-S3 to the Design pause in one process; a separate `approve` process
+resolves it and loops S4-S8 to the Release pause; a third process resolves
+that to `completed` — proving reload at a *real* checkpoint boundary, not an
+artificial one-stage-at-a-time simulation. 4 new/rewritten unit tests in
+`tests/unit/engine/test_fsm.py`, including dedicated proofs that (a) multiple
+stages run in one call when nothing pauses them, and (b) a stage failure
+stops the loop rather than retrying. 121 tests total, 96.73% overall coverage.
+
+**Sequencing note:** this was implemented and verified as one continuous
+change, then split into two commits after the fact (`git stash` on the
+CLI/test files while `fsm.py` was reconstructed to its pre-loop state) so the
+terminal-state unification (item 2) and the loop (item 7) each landed as their
+own reviewable commit, per the reviewer's request — both were verified
+independently passing all gates before either commit.
+
+**Deferred / assumed:**
+- Still no bounded-retry loop (T7.1) — a failed stage simply stops `drive()`;
+  there is no automatic re-attempt, fix-call, or rollback yet. That remains
+  exactly T7.1's job; this change only makes the *absence* of retry logic
+  safe under looping (stop, don't spin) rather than leaving it unsafe.
+
