@@ -133,6 +133,48 @@ def test_metrics_to_model_round_trips_into_a_pydantic_model(tmp_path: Path) -> N
     assert "run_success" in model.model_dump_json()
 
 
+def test_compute_metrics_excludes_a_skipped_stage_from_first_pass_rate(
+    tmp_path: Path,
+) -> None:
+    """T9.7/item 8: found on a real run's own metrics.json -- S2 skipped
+    (greenfield) plus S0/S1/S3 all passing first try showed up as
+    stage_first_pass_rate 0.5 (2/4), not 1.0 (3/3): a "skipped" status
+    was being counted as a first-attempt failure instead of being excluded
+    from the rate the same way an unfinished span already is."""
+    log = EventLog(tmp_path / "events.jsonl")
+
+    def append(
+        event_type: EventType,
+        seconds: int,
+        stage: str | None = None,
+        attempt: int | None = None,
+        payload: dict[str, object] | None = None,
+    ) -> None:
+        log.append(
+            EventDraft(
+                run_id=RUN_ID,
+                event_type=event_type,
+                recorded_at=_at(seconds),
+                stage=stage,
+                attempt=attempt,
+                payload=payload or {},
+            )
+        )
+
+    append(EventType.STAGE_STARTED, 0, "s0", 1)
+    append(EventType.STAGE_FINISHED, 5, "s0", 1, {"status": "passed"})
+    append(EventType.STAGE_STARTED, 5, "s1", 1)
+    append(EventType.STAGE_FINISHED, 10, "s1", 1, {"status": "passed"})
+    append(EventType.STAGE_STARTED, 10, "s2", 1)
+    append(EventType.STAGE_FINISHED, 10, "s2", 1, {"status": "skipped"})
+    append(EventType.STAGE_STARTED, 10, "s3", 1)
+    append(EventType.STAGE_FINISHED, 20, "s3", 1, {"status": "passed"})
+
+    metrics = compute_metrics(log.read_all())
+
+    assert metrics.stage_first_pass_rate == 1.0
+
+
 def test_compute_metrics_counts_rollback_events(tmp_path: Path) -> None:
     log = EventLog(tmp_path / "events.jsonl")
     log.append(

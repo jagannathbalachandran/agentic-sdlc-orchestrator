@@ -258,6 +258,19 @@ def test_drive_retries_a_failing_stage_up_to_its_bounded_limit_then_falls_back_t
     assert isinstance(stop_events[0]["payload"], dict)
     assert stop_events[0]["payload"]["attempts"] == 2
 
+    # T9.7/item 8: an ordinary bounded-retry re-attempt (not a design
+    # rejection or Clarification answer) must also record a RETRY event, so
+    # metrics.json's retry_count reflects it — previously only a
+    # rejection/answer emitted one at all. Only attempt 1's failure gets a
+    # retry (there's still budget left); attempt 2's failure falls back to
+    # human instead, with no further retry to record.
+    retry_events = [e for e in events if e["event_type"] == "retry"]
+    assert len(retry_events) == 1
+    assert retry_events[0]["stage"] == "S0"
+    assert retry_events[0]["attempt"] == 1
+    assert isinstance(retry_events[0]["payload"], dict)
+    assert retry_events[0]["payload"]["trigger"] == "automatic_retry"
+
 
 def test_drive_reloads_state_between_calls_and_continues_past_a_pause(
     tmp_path: Path,

@@ -1150,12 +1150,34 @@ def _handle_stage_failure(
             f"this retry cycle ({attempts} total)",
         )
         return
+    _record_automatic_retry(resources, spec.stage_id, attempts)
     if spec.stage_id is StageId.S6_VERIFY:
         subject = (
             "S5a-fix: address S6 verification failure\n\n"
             f"{batch_result.result.response.summary}"
         )
         _run_fix_call(resources, graph_state, subject, attempts)
+
+
+def _record_automatic_retry(
+    resources: _LoopResources, stage_id: StageId, attempts: int
+) -> None:
+    """T9.7/item 8: found on a real run's own metrics.json — retry_count
+    only ever counted a design-rejection/Clarification re-plan (the only two
+    places that emitted a RETRY event); an ordinary bounded-retry re-attempt
+    (a stage fails, then automatically tries again) recorded no event at
+    all, so `retry_count` silently undercounted the far more common case.
+    """
+    resources.event_log.append(
+        EventDraft(
+            run_id=resources.ref.run_id,
+            event_type=EventType.RETRY,
+            recorded_at=datetime.now(UTC),
+            stage=stage_id.value,
+            attempt=attempts,
+            payload={"trigger": "automatic_retry"},
+        )
+    )
 
 
 def _handle_s7b_findings(

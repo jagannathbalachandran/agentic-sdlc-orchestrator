@@ -16,6 +16,7 @@ from dataclasses import dataclass, field
 from pydantic import BaseModel
 
 from orchestrator.models.events import Event, EventType
+from orchestrator.models.graph import StageStatus
 from orchestrator.models.run import RunState
 
 
@@ -47,13 +48,24 @@ def _stage_attempt_spans(events: tuple[Event, ...]) -> list[_StageAttemptSpan]:
             )
         elif event.event_type is EventType.STAGE_FINISHED and key in open_spans:
             span = open_spans.pop(key)
+            status = event.payload.get("status")
             closed.append(
                 _StageAttemptSpan(
                     stage=span.stage,
                     attempt=span.attempt,
                     started_at=span.started_at,
                     finished_at=event.recorded_at.timestamp(),
-                    passed=event.payload.get("status") == "passed",
+                    # None for "skipped" (T9.7/item 8 found on a real run's
+                    # own metrics.json): a skipped stage (S2, greenfield)
+                    # is neither a pass nor a failure, so it must stay out
+                    # of stage_first_pass_rate's denominator the same way
+                    # an unfinished span already does, not silently count
+                    # against it as a first-attempt failure.
+                    passed=(
+                        None
+                        if status == "skipped"
+                        else status == StageStatus.PASSED.value
+                    ),
                 )
             )
     closed.extend(open_spans.values())
