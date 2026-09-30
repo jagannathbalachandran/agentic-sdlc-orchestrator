@@ -366,3 +366,25 @@ this itself. Repo verified clean; Claude Code instructed to use throwaway
 repos for any further verification.
 
 **Result:** 283 tests, full gate green. Ready for T10.1.
+
+## 2026-09-30 — Fixes after the first real run
+
+Claude Code fixed all findings from run 001 (325 tests, 96.23% coverage).
+
+**Root cause of the unchanged design (diagnosed by Claude Code):** the
+design-rejection path re-ran S3 but never saved the rejection comment where
+the prompt builder could read it (the clarification path did), so S3 got an
+identical prompt and produced an identical design. Combined with a retry
+budget counted cumulatively rather than per re-plan, the single failure
+ended the run. Fixed both; added a gate that fails any retry which changes
+nothing.
+
+**Other fixes:** citation gates parse real headings and fail on zero items;
+agent transcripts and agent_call_id recorded; run record now includes
+scenario and config snapshots and stage artifacts; architect must state a
+technology stack (profile rule + new gate).
+
+**Metrics check against run 001's real data:** confirmed and fixed two
+counting bugs — a skipped stage counted as a first-pass failure (explained
+the 0.5), and automatic retries emitting no retry event. Design rejections
+are intentionally counted in retry_count (documented in the README).
