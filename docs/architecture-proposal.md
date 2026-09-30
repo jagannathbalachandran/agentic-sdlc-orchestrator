@@ -752,13 +752,12 @@ gap, and belongs in the engineering summary's limitations section verbatim.
 
 **Limitations (for the engineering summary):**
 
-1. **C6 — 1 of 8 policies not built.** Dependency control is designed (§1.1, §2 O-7) but
-   not implemented in this slice. The other seven — workspace confinement, path
-   partitioning, protected paths, main protection, secret scan, schema change control,
-   and diff-size limit — are all built; schema change control specifically is required
-   in-scope because the brownfield showcase's migration needs to trigger
-   Change-control approval (§12). A change that adds an unapproved dependency will not
-   be caught by policy in this build.
+1. **C6 — all 8 policies are now built** (dependency control, §1.1/§2 O-7, landed in
+   the pre-T10 integration pass, after this proposal originally scoped it out): workspace
+   confinement, path partitioning, protected paths, main protection, secret scan, schema
+   change control, diff-size limit, and dependency control. Left here, updated rather than
+   deleted, since the engineering summary's limitations list is meant to track this
+   proposal's own trims over time, not just its final state.
 2. **C11 — re-planning covers design rejection only.** The literal C11 AC (rejecting the
    design re-runs S3 onward) is built; the broader extension this proposal designed for
    Change-control and Release rejection (G-9) is documented but not implemented —
@@ -781,6 +780,42 @@ gap, and belongs in the engineering summary's limitations section verbatim.
    diff+hash check (C6, DECIDED) is the actual enforcement point — this was already
    true by design (§2 O-6), but is now an empirically grounded limitation rather than
    a documentation caveat: don't read the preventive flags as a guarantee.
+6. **§11's run-record directory layout deviates from what's actually built.** §11's own
+   picture nests every deliverable under `docs/requirements/<REQ-id>-<slug>/`
+   (`00-source.md`, `01-requirements.md`, `02-design.md`, `03-plan.md`,
+   `traceability.md`, one folder per requirement). Every piece of code that reads or
+   writes these files — the citation gates, the traceability generator, every stage's
+   fixtures, every agent profile's own output-file instructions — was built against
+   flat, workspace-root filenames instead, before this deviation was ever explicitly
+   decided. Reconciling the two would touch dozens of already-tested files for a
+   concern orthogonal to whatever task next needs the code; the flat convention is
+   kept everywhere, consistently, rather than fixed in only part of the codebase.
+7. **C5's "command gates (tests, coverage, lint, types, audit)" is one gate, not five.**
+   S6's real exit gate runs a workspace's own `scripts/check.py` wholesale — for a
+   workspace built from the greenfield template or either registered target repo,
+   that script already runs all five checks the requirement names, so the outcome
+   matches C5's intent — but it is one pass/fail signal, not five independently
+   configurable gates a project could tune or waive individually. A workspace with no
+   `scripts/check.py` at all (no template/target match) passes this gate leniently
+   rather than failing outright, which is itself a second, related limitation:
+   nothing stops a misconfigured target from silently skipping verification.
+8. **C14's "push" lands the run branch in the target's own local clone, not GitHub.**
+   `git push origin run/<run-id>` runs against whatever the workspace's own `origin`
+   remote resolves to — for both registered projects in this build, that's the
+   target's local working-copy path (T5.2), not `github.com` directly. Getting the
+   branch onto the real GitHub remote is a separate, human-owned action (pushing from
+   the target repo's own clone) outside the orchestrator's own scope in this build;
+   `run.json`'s `push_result`/`target_url` record what the orchestrator itself did,
+   not that the branch reached GitHub.
+9. **A run's own lock is not held continuously across `approve`/`reject`/`answer`.**
+   Each of `resolve_checkpoint()` and the `drive()` call that follows it acquires and
+   releases the per-project lock (`engine/locking.py`) separately, as two distinct
+   critical sections, not one atomic transaction spanning both — the CLI commands that
+   call them in sequence (`approve.py` et al.) do so as two separate lock cycles. A
+   second process could acquire the lock in the (typically brief) window between the
+   two calls and interleave a conflicting operation on the same run. No corruption
+   results (each call's own state read/write stays internally consistent), but the
+   two calls together are not the atomic "resolve-then-continue" unit they read as.
 
 **At-risk items (schedule, not scope):**
 
