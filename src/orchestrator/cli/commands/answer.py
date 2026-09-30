@@ -6,14 +6,16 @@ import argparse
 from pathlib import Path
 
 from orchestrator.cli.commands._common import (
-    FIXTURES_ROOT,
+    build_reliability_limits,
     describe,
+    executor_for,
     max_run_duration_seconds,
+    policies_for,
+    push_if_completed,
+    record_run,
 )
 from orchestrator.engine.fsm import DriveRequest, RunRef, drive, resolve_checkpoint
-from orchestrator.executors.mock import MockExecutor
 from orchestrator.models.approvals import ApprovalDecision
-from orchestrator.policies.registry import build_default_policies
 
 COMMAND_NAME = "answer"
 
@@ -39,10 +41,20 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
         ref, ApprovalDecision.ANSWER, args.comment, args.approver, duration
     )
     result = drive(
-        DriveRequest(orch_home, args.project, args.run_id, graph_state.scenario_id),
-        executor=MockExecutor(FIXTURES_ROOT),
+        DriveRequest(
+            orch_home,
+            args.project,
+            args.run_id,
+            graph_state.scenario_id,
+            target_repo_url=graph_state.target_repo_url,
+            executor_kind=graph_state.executor_kind,
+        ),
+        executor=executor_for(graph_state.executor_kind),
         max_run_duration_seconds=duration,
-        policies=build_default_policies(),
+        policies=policies_for(graph_state.target_repo_url),
+        reliability=build_reliability_limits(),
     )
+    push_result = push_if_completed(ref, result.graph_state)
+    record_run(orch_home, args.project, result.graph_state, args.approver, push_result)
     print(describe(result.graph_state))
     return 0

@@ -12,7 +12,7 @@ from enum import StrEnum
 from pydantic import BaseModel, Field
 
 from orchestrator.models.approvals import ApprovalCheckpointKind
-from orchestrator.models.run import RunState
+from orchestrator.models.run import ExecutorKind, RunState
 
 
 class StageId(StrEnum):
@@ -118,3 +118,4 @@ class GraphState(BaseModel):
     requirement_text: str = ""
     req_id: str = ""
     template_path: str | None = None
+    executor_kind: ExecutorKind = ExecutorKind.MOCK

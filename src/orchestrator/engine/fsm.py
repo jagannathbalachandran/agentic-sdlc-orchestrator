@@ -101,7 +101,7 @@ from orchestrator.models.graph import (
     StageSpec,
     StageStatus,
 )
-from orchestrator.models.run import RunState
+from orchestrator.models.run import ExecutorKind, RunState
 from orchestrator.policies.base import Policy, PolicyOutcome, compute_diff
 from orchestrator.workspace.git_ops import (
     clone_repo,
@@ -168,15 +168,17 @@ class DriveRequest:
     """Which run to advance, and (for a brand-new run) its scenario_id.
 
     `inject_fault`, `target_repo_url`, `base_ref`, `requirement_text`,
-    `req_id` and `template_path` only matter the first time a run's
-    GraphState is created — each is copied onto the matching `GraphState`
-    field there and persists from then on, so `approve`/`reject`/`answer`
-    re-entering `drive()` for an existing run don't need to (and can't
-    easily) re-supply them. Resolving `target_repo_url` (the registry
-    lookup) and `requirement_text`/`req_id`/`base_ref` (the scenario config)
-    is the CLI layer's job (`cli/commands/_common.py`) — `drive()` itself
-    never touches the registry or scenario config files, only what's already
-    been resolved into this request.
+    `req_id`, `template_path` and `executor_kind` only matter the first time
+    a run's GraphState is created — each is copied onto the matching
+    `GraphState` field there and persists from then on, so `approve`/
+    `reject`/`answer` re-entering `drive()` for an existing run don't need to
+    (and can't easily) re-supply them — they read the persisted
+    `GraphState.executor_kind` back instead (`engine.fsm.load_graph_state`)
+    to reconstruct the *same* executor the run started with. Resolving
+    `target_repo_url` (the registry lookup) and `requirement_text`/`req_id`/
+    `base_ref` (the scenario config) is the CLI layer's job (`cli/commands/
+    _common.py`) — `drive()` itself never touches the registry or scenario
+    config files, only what's already been resolved into this request.
 
     `target_repo_url is None` means no real target is configured (the stub/
     test-graph case) — S0's commit hook then just adds `00-source.md` to
@@ -195,6 +197,7 @@ class DriveRequest:
     requirement_text: str = ""
     req_id: str = ""
     template_path: str | None = None
+    executor_kind: ExecutorKind = ExecutorKind.MOCK
 
     @property
     def ref(self) -> RunRef:
@@ -410,12 +413,23 @@ def _load_or_init_graph_state(request: DriveRequest) -> GraphState:
         requirement_text=request.requirement_text,
         req_id=request.req_id,
         template_path=request.template_path,
+        executor_kind=request.executor_kind,
     )
 
 
 def _load_existing_graph_state(ref: RunRef) -> GraphState:
     """Load state for a run that must already exist (resolve_checkpoint/stop_run)."""
     return read_json(_state_path(ref), GraphState)
+
+
+def load_graph_state(ref: RunRef) -> GraphState:
+    """Public read-only peek at a run's current state — the CLI layer's one
+    way to recover which executor/target a run started with (persisted onto
+    `GraphState` the first time `drive()` creates it) before re-entering
+    `drive()`/`resolve_checkpoint()` for `approve`/`reject`/`answer`, without
+    duplicating graph.json's read path.
+    """
+    return _load_existing_graph_state(ref)
 
 
 @dataclass(frozen=True)

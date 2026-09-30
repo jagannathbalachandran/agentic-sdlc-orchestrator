@@ -6,11 +6,16 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from orchestrator.cli.commands._common import describe, max_run_duration_seconds
+from orchestrator.cli.commands._common import (
+    describe,
+    max_run_duration_seconds,
+    record_run,
+)
 from orchestrator.engine.fsm import RunRef, stop_run
 
 COMMAND_NAME = "stop"
 DEFAULT_STOP_REASON = "operator requested stop"
+DEFAULT_OPERATOR = "operator"
 
 
 def add_subparser(
@@ -31,5 +36,6 @@ def handle(args: argparse.Namespace, orch_home: Path) -> int:
     graph_state = stop_run(
         RunRef(orch_home, args.project, args.run_id), args.reason, duration
     )
+    record_run(orch_home, args.project, graph_state, DEFAULT_OPERATOR)
     print(describe(graph_state))
     return 0
