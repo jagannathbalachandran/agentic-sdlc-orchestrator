@@ -163,6 +163,7 @@ def _response_from_envelope(
         summary=str(summary.get("summary", "")),
         produced_ids=tuple(summary.get("produced_ids", ())),
         files_written=tuple(summary.get("files_written", ())),
+        high_severity_findings=tuple(summary.get("high_severity_findings", ())),
         duration_seconds=duration_seconds,
         cost_usd=cost_usd,
         session_id=session_id,

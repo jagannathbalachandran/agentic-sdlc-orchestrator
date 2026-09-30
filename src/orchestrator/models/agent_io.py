@@ -42,12 +42,19 @@ class AgentCallRequest(BaseModel):
 
 
 class AgentCallResponse(BaseModel):
-    """Executor call result: a small summary, not stage-output content (O-4)."""
+    """Executor call result: a small summary, not stage-output content (O-4).
+
+    `high_severity_findings` is S7b-specific (empty for every other stage) —
+    the reviewer profile's own finding IDs it judged high severity, driving
+    the S7b-findings bounded retry (T7.1, G-15) without needing to parse the
+    findings report file itself.
+    """
 
     outcome: AgentCallOutcome
     summary: str = ""
     produced_ids: tuple[str, ...] = ()
     files_written: tuple[str, ...] = ()
+    high_severity_findings: tuple[str, ...] = ()
     duration_seconds: float
     cost_usd: float | None = None
     session_id: str | None = None

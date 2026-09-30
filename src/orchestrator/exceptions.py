@@ -67,3 +67,11 @@ class RunAlreadyTerminalError(OrchestratorError):
         super().__init__(f"run {run_id!r} is already {terminal_state}")
         self.run_id = run_id
         self.terminal_state = terminal_state
+
+
+class NoCheckpointRecordedError(OrchestratorError):
+    """rollback was called before any stage's exit gate has ever passed (G-14)."""
+
+    def __init__(self, run_id: str) -> None:
+        super().__init__(f"run {run_id!r} has no recorded checkpoint to roll back to")
+        self.run_id = run_id

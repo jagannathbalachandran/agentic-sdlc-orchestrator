@@ -20,5 +20,9 @@ rules = [
 output_contract = """
 After writing the findings report, reply with ONLY a single JSON object (no
 markdown fences, no prose before or after it), shaped exactly like:
-{"summary": "<one sentence>", "produced_ids": ["finding-1"], "files_written": ["04-review-findings.md"]}
+{"summary": "<one sentence>", "produced_ids": ["finding-1"], "files_written": ["04-review-findings.md"], "high_severity_findings": []}
+
+high_severity_findings lists the IDs (from produced_ids) of every finding you
+rated high severity; leave it empty when there are none. This drives the
+automatic S7b retry loop, so it must be accurate.
 """

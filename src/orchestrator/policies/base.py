@@ -15,7 +15,11 @@ from typing import Protocol
 
 from pydantic import BaseModel
 
-from orchestrator.workspace.git_ops import current_branch, run_git
+from orchestrator.workspace.git_ops import (
+    current_branch,
+    current_commit_or_empty_tree,
+    run_git,
+)
 
 ADDED_LINE_PREFIX = "+"
 REMOVED_LINE_PREFIX = "-"
@@ -99,12 +103,18 @@ def _parse_file_patch(patch: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
 
 
 def compute_diff(workspace_path: Path, base_commit: str) -> WorkspaceDiff:
-    """Build a `WorkspaceDiff` for everything committed since `base_commit`."""
-    head_commit = run_git(workspace_path, "rev-parse", "HEAD")
-    changed = run_git(workspace_path, "diff", "--name-only", base_commit, "HEAD")
+    """Build a `WorkspaceDiff` for everything committed since `base_commit`.
+
+    Uses `current_commit_or_empty_tree`, not a literal `HEAD` rev-parse — S6
+    can run with zero commits in the workspace so far (e.g. every upstream
+    stage has `commit_strategy=NONE`), and plain `git rev-parse HEAD`/
+    `git diff ... HEAD` both fail on a repo with no commits at all.
+    """
+    head_commit = current_commit_or_empty_tree(workspace_path)
+    changed = run_git(workspace_path, "diff", "--name-only", base_commit, head_commit)
     files = []
     for path in (line for line in changed.splitlines() if line.strip()):
-        patch = run_git(workspace_path, "diff", base_commit, "HEAD", "--", path)
+        patch = run_git(workspace_path, "diff", base_commit, head_commit, "--", path)
         added, removed = _parse_file_patch(patch)
         files.append(FileChange(path=path, added_lines=added, removed_lines=removed))
     return WorkspaceDiff(

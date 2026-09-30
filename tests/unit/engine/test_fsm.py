@@ -9,23 +9,38 @@ from pathlib import Path
 import pytest
 
 from orchestrator.audit.approvals_log import read_approvals
+from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.engine.fsm import (
     DriveRequest,
+    ReliabilityLimits,
+    RunRef,
     drive,
     generate_run_id,
     resolve_checkpoint,
+    rollback_to_checkpoint,
     run_dir,
     stop_run,
     workspace_dir,
 )
 from orchestrator.engine.graph import GRAPH
-from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
+from orchestrator.exceptions import (
+    NoCheckpointRecordedError,
+    NoPendingApprovalError,
+    RunAlreadyTerminalError,
+)
 from orchestrator.executors.mock import MockExecutor
 from orchestrator.models.approvals import ApprovalCheckpointKind, ApprovalDecision
-from orchestrator.models.graph import CommitStrategy, StageId, StageSpec, StageStatus
+from orchestrator.models.graph import (
+    CommitStrategy,
+    GraphState,
+    StageId,
+    StageSpec,
+    StageStatus,
+)
 from orchestrator.models.run import RunState
 from orchestrator.policies.schema_change_control import SchemaChangeControlPolicy
 from orchestrator.policies.secret_scan import SecretScanPolicy
+from orchestrator.workspace.git_ops import current_commit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES_ROOT = REPO_ROOT / "fixtures" / "mock"
@@ -86,6 +101,67 @@ def _stub_graph_s0_then_s6() -> dict[StageId, StageSpec]:
     }
 
 
+def _stub_graph_s5a_then_s6() -> dict[StageId, StageSpec]:
+    """S5a (commits, developer) -> S6 — isolates S6's bounded-retry + fix-call
+    mechanism (T7.1, G-13) from the rest of the real graph.
+    """
+    return {
+        StageId.S5A_IMPLEMENT: StageSpec(
+            stage_id=StageId.S5A_IMPLEMENT,
+            owner_profile="developer",
+            commit_strategy=CommitStrategy.ONE,
+        ),
+        StageId.S6_VERIFY: StageSpec(
+            stage_id=StageId.S6_VERIFY,
+            depends_on=(StageId.S5A_IMPLEMENT,),
+            commit_strategy=CommitStrategy.NONE,
+        ),
+    }
+
+
+def _stub_graph_s6_s7a_s7b() -> dict[StageId, StageSpec]:
+    """S6 -> {S7a, S7b} — isolates S7b's findings-driven bounded retry (T7.1,
+    G-15), which invalidates and re-runs all three.
+    """
+    return {
+        StageId.S6_VERIFY: StageSpec(
+            stage_id=StageId.S6_VERIFY, commit_strategy=CommitStrategy.NONE
+        ),
+        StageId.S7A_DOCS: StageSpec(
+            stage_id=StageId.S7A_DOCS,
+            owner_profile="technical_writer",
+            depends_on=(StageId.S6_VERIFY,),
+            commit_strategy=CommitStrategy.ONE,
+        ),
+        StageId.S7B_REVIEW: StageSpec(
+            stage_id=StageId.S7B_REVIEW,
+            owner_profile="reviewer",
+            depends_on=(StageId.S6_VERIFY,),
+            commit_strategy=CommitStrategy.NONE,
+        ),
+    }
+
+
+def _stub_graph_three_chained_stages() -> dict[StageId, StageSpec]:
+    """S0 -> S1 -> S2, all generic-fixture-backed — enough stages that a
+    max_agent_calls cap can fire mid-run, before the graph would otherwise
+    complete on its own (T7.1 safe-stop).
+    """
+    return {
+        StageId.S0_PREPARE: StageSpec(stage_id=StageId.S0_PREPARE),
+        StageId.S1_REQUIREMENTS: StageSpec(
+            stage_id=StageId.S1_REQUIREMENTS,
+            owner_profile="analyst",
+            depends_on=(StageId.S0_PREPARE,),
+        ),
+        StageId.S2_CODEBASE_ANALYSIS: StageSpec(
+            stage_id=StageId.S2_CODEBASE_ANALYSIS,
+            owner_profile="analyst",
+            depends_on=(StageId.S1_REQUIREMENTS,),
+        ),
+    }
+
+
 def _write_fixture(
     fixtures_root: Path, scenario_id: str, stage: str, fixture: dict[str, object]
 ) -> None:
@@ -133,11 +209,13 @@ def test_drive_loops_through_multiple_stages_in_one_call_when_nothing_pauses_it(
     assert result.graph_state.terminal_state is RunState.COMPLETED
 
 
-def test_drive_stops_the_loop_when_a_stage_fails_instead_of_retrying(
+def test_drive_retries_a_failing_stage_up_to_its_bounded_limit_then_falls_back_to_human(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """No bounded-retry loop exists yet (T7.1) — drive() must stop on a stage
-    failure rather than re-attempting it forever in a tight loop."""
+    """T7.1's bounded retry: a generic stage failure (here, no fixture at all
+    -> AgentCallOutcome.ERROR) is retried up to invalid_output_max_attempts
+    (2, the default) before falling back to human as terminal FAILED with
+    full context — not an infinite tight loop, and not an immediate stop."""
     monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_no_checkpoint())
     empty_fixtures_root = tmp_path / "no-fixtures-here"
     request = _request(tmp_path)
@@ -148,10 +226,16 @@ def test_drive_stops_the_loop_when_a_stage_fails_instead_of_retrying(
         max_run_duration_seconds=3600,
     )
 
-    assert result.ran_stages == (StageId.S0_PREPARE,)
+    assert result.ran_stages == (StageId.S0_PREPARE, StageId.S0_PREPARE)
     assert result.graph_state.stages[StageId.S0_PREPARE].status is StageStatus.FAILED
+    assert result.graph_state.stages[StageId.S0_PREPARE].attempts == 2
     assert StageId.S1_REQUIREMENTS not in result.graph_state.stages
-    assert result.graph_state.terminal_state is None
+    assert result.graph_state.terminal_state is RunState.FAILED
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    stop_events = [e for e in events if e["event_type"] == "stop"]
+    assert len(stop_events) == 1
+    assert isinstance(stop_events[0]["payload"], dict)
+    assert stop_events[0]["payload"]["attempts"] == 2
 
 
 def test_drive_reloads_state_between_calls_and_continues_past_a_pause(
@@ -508,3 +592,225 @@ def test_s6_critical_policy_violation_stops_the_run(
     assert result.graph_state.pending_checkpoint is None
     events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
     assert any(e["event_type"] == "stop" for e in events)
+
+
+def test_s6_failure_gets_a_fix_call_and_passes_on_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7.1/G-13: S6's first attempt fails (no fixture -> ERROR); a developer
+    fix call runs (attempt 2's own fixture); S6's second attempt passes."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_s5a_then_s6())
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S5a",
+        {
+            "summary": "implemented",
+            "produced_ids": [],
+            "files_written": ["src/app.py"],
+            "files": {"src/app.py": "x = 1\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S5a-2",
+        {
+            "summary": "fixed",
+            "produced_ids": [],
+            "files_written": ["src/app.py"],
+            "files": {"src/app.py": "x = 2\n"},
+        },
+    )
+    # No S6/S6-1 fixture at all -> attempt 1 is AgentCallOutcome.ERROR (FAILED).
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S6-2",
+        {"summary": "verified", "produced_ids": [], "files_written": [], "files": {}},
+    )
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+
+    result = drive(
+        request, executor=MockExecutor(fixtures_root), max_run_duration_seconds=3600
+    )
+
+    assert result.graph_state.stages[StageId.S6_VERIFY].status is StageStatus.PASSED
+    assert result.graph_state.stages[StageId.S6_VERIFY].attempts == 2
+    assert result.graph_state.terminal_state is RunState.COMPLETED
+    assert result.ran_stages.count(StageId.S6_VERIFY) == 2
+
+
+def test_s6_failure_falls_back_to_human_after_exhausting_its_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7.1's DoD: hitting the bounded-loop max falls back to human with full
+    context — terminal FAILED, not a silent stop, with the attempt count and
+    reason recorded on the stop event."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_s5a_then_s6())
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S5a",
+        {
+            "summary": "implemented",
+            "produced_ids": [],
+            "files_written": ["src/app.py"],
+            "files": {"src/app.py": "x = 1\n"},
+        },
+    )
+    # No S6 fixture, ever (any attempt) -> every attempt is ERROR (FAILED).
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+
+    result = drive(
+        request, executor=MockExecutor(fixtures_root), max_run_duration_seconds=3600
+    )
+
+    assert result.graph_state.stages[StageId.S6_VERIFY].status is StageStatus.FAILED
+    assert result.graph_state.stages[StageId.S6_VERIFY].attempts == 3
+    assert result.graph_state.terminal_state is RunState.FAILED
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    stop_events = [e for e in events if e["event_type"] == "stop"]
+    assert len(stop_events) == 1
+    assert isinstance(stop_events[0]["payload"], dict)
+    assert stop_events[0]["payload"]["attempts"] == 3
+    assert "S6" in str(stop_events[0]["payload"]["reason"])
+
+
+def test_s7b_high_severity_findings_trigger_a_fix_call_and_rerun_s6_s7a_s7b(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T7.1/G-15: S7b passes its own call but reports a high-severity finding
+    -> a fix call, then S6/S7a/S7b are all invalidated and re-run (not just
+    S7b) -> a clean second S7b pass completes the run."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_s6_s7a_s7b())
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S6",
+        {"summary": "verified", "produced_ids": [], "files_written": [], "files": {}},
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S7a",
+        {
+            "summary": "docs updated",
+            "produced_ids": [],
+            "files_written": ["README.md"],
+            "files": {"README.md": "# docs\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S7b",
+        {
+            "summary": "found a high severity issue",
+            "produced_ids": ["finding-1"],
+            "files_written": [],
+            "files": {},
+            "high_severity_findings": ["finding-1"],
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S5a-2",
+        {
+            "summary": "fixed the finding",
+            "produced_ids": [],
+            "files_written": ["src/fix.py"],
+            "files": {"src/fix.py": "# fix\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S7b-2",
+        {
+            "summary": "no more issues",
+            "produced_ids": [],
+            "files_written": [],
+            "files": {},
+            "high_severity_findings": [],
+        },
+    )
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+
+    result = drive(
+        request, executor=MockExecutor(fixtures_root), max_run_duration_seconds=3600
+    )
+
+    assert result.graph_state.terminal_state is RunState.COMPLETED
+    assert result.graph_state.stages[StageId.S7B_REVIEW].attempts == 2
+    assert result.ran_stages.count(StageId.S6_VERIFY) == 2
+    assert result.ran_stages.count(StageId.S7A_DOCS) == 2
+    assert result.ran_stages.count(StageId.S7B_REVIEW) == 2
+
+
+def test_safe_stop_ends_the_run_when_max_agent_calls_is_exceeded(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C9 safe-stop: exceeding max_agent_calls stops the run mid-graph,
+    terminal STOPPED, with the trigger recorded — not a retry-exhaustion
+    fallback, and not silently ignored."""
+    monkeypatch.setattr(
+        "orchestrator.engine.fsm.GRAPH", _stub_graph_three_chained_stages()
+    )
+    request = _request(tmp_path)
+    reliability = ReliabilityLimits(max_agent_calls=1)
+
+    result = drive(
+        request,
+        executor=MockExecutor(FIXTURES_ROOT),
+        max_run_duration_seconds=3600,
+        reliability=reliability,
+    )
+
+    assert result.graph_state.terminal_state is RunState.STOPPED
+    assert StageId.S2_CODEBASE_ANALYSIS not in result.graph_state.stages
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    stop_events = [e for e in events if e["event_type"] == "stop"]
+    assert len(stop_events) == 1
+    assert isinstance(stop_events[0]["payload"], dict)
+    assert "max_agent_calls" in str(stop_events[0]["payload"]["reason"])
+
+
+def test_rollback_to_checkpoint_resets_the_workspace_to_the_last_recorded_checkpoint(
+    tmp_path: Path,
+) -> None:
+    """T7.1/G-14: rollback discards uncommitted work and any commits made
+    after the last recorded checkpoint, landing exactly on that commit."""
+    request = _request(tmp_path)
+    drive(request, executor=MockExecutor(FIXTURES_ROOT), max_run_duration_seconds=3600)
+    workspace = workspace_dir(tmp_path, "demo", "run-1")
+    graph_state = read_json(
+        run_dir(tmp_path, "demo", "run-1") / "graph.json", GraphState
+    )
+    checkpoint_commit = graph_state.last_checkpoint_commit
+    assert checkpoint_commit is not None
+
+    (workspace / "rogue.txt").write_text("uncommitted junk\n", encoding="utf-8")
+    assert (workspace / "rogue.txt").is_file()
+
+    rollback_to_checkpoint(request.ref, 3600)
+
+    assert current_commit(workspace) == checkpoint_commit
+    assert not (workspace / "rogue.txt").exists()
+
+
+def test_rollback_raises_when_no_checkpoint_has_ever_been_recorded(
+    tmp_path: Path,
+) -> None:
+    ref = RunRef(tmp_path, "demo", "run-1")
+    atomic_write_json(
+        run_dir(tmp_path, "demo", "run-1") / "graph.json",
+        GraphState(run_id="run-1", scenario_id="demo-scenario"),
+    )
+
+    with pytest.raises(NoCheckpointRecordedError):
+        rollback_to_checkpoint(ref, 3600)

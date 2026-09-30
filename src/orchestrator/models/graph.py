@@ -95,3 +95,6 @@ class GraphState(BaseModel):
     pending_checkpoint: ApprovalCheckpointKind | None = None
     terminal_state: RunState | None = None
     base_commit: str | None = None
+    started_at: datetime | None = None
+    last_checkpoint_commit: str | None = None
+    agent_call_count: int = 0

@@ -15,8 +15,14 @@ from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 
-from orchestrator.engine.runner import StageRunner, StageRunRequest, StageRunResult
-from orchestrator.models.graph import StageSpec
+from orchestrator.engine.runner import (
+    StageGateFailure,
+    StageRunner,
+    StageRunRequest,
+    StageRunResult,
+)
+from orchestrator.models.agent_io import AgentCallOutcome, AgentCallResponse
+from orchestrator.models.graph import StageSpec, StageStatus
 
 BuildRunner = Callable[[StageSpec], StageRunner]
 BuildRequest = Callable[[StageSpec], StageRunRequest]
@@ -28,6 +34,25 @@ class BatchResult:
 
     spec: StageSpec
     result: StageRunResult
+
+
+def _run_one(runner: StageRunner, request: StageRunRequest) -> StageRunResult:
+    """Run one spec; a gate failure becomes a FAILED result (T7.1's bounded
+    retry needs every failure mode to reach it uniformly), not an exception —
+    StageRunner.run() itself still raises (tested directly), this is the one
+    place that catches it, since fsm.py's retry logic is the caller documented
+    to decide what happens next.
+    """
+    try:
+        return runner.run(request)
+    except StageGateFailure as exc:
+        return StageRunResult(
+            status=StageStatus.FAILED,
+            response=AgentCallResponse(
+                outcome=AgentCallOutcome.ERROR, summary=str(exc), duration_seconds=0.0
+            ),
+            commit=None,
+        )
 
 
 def run_batch(
@@ -42,12 +67,12 @@ def run_batch(
     """
     if len(specs) <= 1:
         return tuple(
-            BatchResult(spec, build_runner(spec).run(build_request(spec)))
+            BatchResult(spec, _run_one(build_runner(spec), build_request(spec)))
             for spec in specs
         )
     with ThreadPoolExecutor(max_workers=len(specs)) as pool:
         futures = [
-            (spec, pool.submit(build_runner(spec).run, build_request(spec)))
+            (spec, pool.submit(_run_one, build_runner(spec), build_request(spec)))
             for spec in specs
         ]
         return tuple(BatchResult(spec, future.result()) for spec, future in futures)

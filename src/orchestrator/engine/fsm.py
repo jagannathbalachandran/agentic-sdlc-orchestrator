@@ -20,23 +20,29 @@ together yet.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
 from orchestrator.audit.approvals_log import append_approval
 from orchestrator.audit.event_log import EventLog
 from orchestrator.audit.run_record import atomic_write_json, read_json
+from orchestrator.config.schema import RetryLimits
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
 from orchestrator.engine.runner import (
     StageGates,
     StageRunner,
     StageRunRequest,
+    no_op_commit,
     stage_commit_hook,
 )
 from orchestrator.engine.scheduler import BatchResult, run_batch
-from orchestrator.exceptions import NoPendingApprovalError, RunAlreadyTerminalError
+from orchestrator.exceptions import (
+    NoCheckpointRecordedError,
+    NoPendingApprovalError,
+    RunAlreadyTerminalError,
+)
 from orchestrator.executors.base import Executor
 from orchestrator.gates.base import Gate
 from orchestrator.gates.existence_gate import ExistenceGate
@@ -48,6 +54,7 @@ from orchestrator.models.approvals import (
 )
 from orchestrator.models.events import EventDraft, EventType
 from orchestrator.models.graph import (
+    CommitStrategy,
     GraphState,
     StageId,
     StageResult,
@@ -57,9 +64,11 @@ from orchestrator.models.graph import (
 from orchestrator.models.run import RunState
 from orchestrator.policies.base import Policy, PolicyOutcome, compute_diff
 from orchestrator.workspace.git_ops import (
+    commit_all,
     current_commit_or_empty_tree,
     ensure_on_branch,
     init_repo,
+    rollback_to,
 )
 
 GRAPH_STATE_FILENAME = "graph.json"
@@ -68,6 +77,23 @@ APPROVALS_FILENAME = "approvals.jsonl"
 DEFAULT_STAGE_TIMEOUT_SECONDS = 600
 DEFAULT_STAGE_BUDGET_USD = 0.5
 RUN_BRANCH_PREFIX = "run/"
+DEFAULT_RETRY_LIMITS = RetryLimits(
+    invalid_output_max_attempts=2,
+    s6_failure_max_attempts=3,
+    s7b_findings_max_attempts=2,
+)
+DEFAULT_MAX_AGENT_CALLS = 60
+
+
+@dataclass(frozen=True)
+class ReliabilityLimits:
+    """The bounded-retry and safe-stop numbers `drive()` enforces (T7.1)."""
+
+    retry_limits: RetryLimits = field(default_factory=lambda: DEFAULT_RETRY_LIMITS)
+    max_agent_calls: int = DEFAULT_MAX_AGENT_CALLS
+
+
+DEFAULT_RELIABILITY_LIMITS = ReliabilityLimits()
 
 
 @dataclass(frozen=True)
@@ -203,6 +229,7 @@ class _LoopResources:
     executor: Executor
     event_log: EventLog
     workspace: Path
+    max_run_duration_seconds: float
 
 
 def _build_runner(resources: _LoopResources, spec: StageSpec) -> StageRunner:
@@ -218,6 +245,14 @@ def _build_runner(resources: _LoopResources, spec: StageSpec) -> StageRunner:
 def _build_request(
     resources: _LoopResources, graph_state: GraphState, spec: StageSpec
 ) -> StageRunRequest:
+    # +1: this call is about to become that stage's *next* attempt — its
+    # StageResult (if any) still holds the *last completed* attempt's count.
+    next_attempt = (
+        graph_state.stages.get(
+            spec.stage_id, StageResult(stage_id=spec.stage_id)
+        ).attempts
+        + 1
+    )
     return StageRunRequest(
         spec=spec,
         run_id=resources.ref.run_id,
@@ -226,6 +261,7 @@ def _build_request(
         rendered_prompt=f"stage {spec.stage_id.value}",
         timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
         budget_usd=DEFAULT_STAGE_BUDGET_USD,
+        attempt=next_attempt,
     )
 
 
@@ -290,28 +326,195 @@ def _evaluate_s6_policies(
     return False
 
 
+def _max_attempts_for(stage_id: StageId, retry_limits: RetryLimits) -> int:
+    """Which bounded-retry count applies to this stage (C9, three separate
+    loops: S6-failure, S7b-findings, and invalid-output for everything else —
+    the current codebase has no real signal distinguishing "invalid output"
+    from any other stage failure, so `invalid_output_max_attempts` is used
+    generically for every stage except S6/S7b, which have their own explicit
+    counts and their own real trigger signals).
+    """
+    if stage_id is StageId.S6_VERIFY:
+        return retry_limits.s6_failure_max_attempts
+    if stage_id is StageId.S7B_REVIEW:
+        return retry_limits.s7b_findings_max_attempts
+    return retry_limits.invalid_output_max_attempts
+
+
+def _fallback_to_human(
+    resources: _LoopResources,
+    graph_state: GraphState,
+    stage_id: StageId,
+    attempts: int,
+    reason: str,
+) -> None:
+    """C9: exhausted retries -> pause for the human with full context, ending
+    as failed rather than silently stopping — the human decides whether to
+    intervene, re-plan, or leave it as `failed`.
+    """
+    graph_state.terminal_state = RunState.FAILED
+    resources.event_log.append(
+        EventDraft(
+            run_id=resources.ref.run_id,
+            event_type=EventType.STOP,
+            recorded_at=datetime.now(UTC),
+            stage=stage_id.value,
+            payload={"reason": reason, "attempts": attempts},
+        )
+    )
+
+
+def _run_fix_call(
+    resources: _LoopResources, graph_state: GraphState, commit_label: str, attempt: int
+) -> None:
+    """One targeted developer fix call (G-13), scoped to whatever just failed
+    — not a full re-run of S5a's own task loop. Committed separately from
+    normal S5a work (`commit_label`, e.g. "S5a-fix: ...") so it's never
+    misread as original implementation — full structured trailers
+    (`Stage: S5a-fix` + `Task`/`FR`) are T8.1's job, this just keeps the
+    message itself distinguishable. `attempt` (the retry count that triggered
+    this fix call, offset by 1) keys its own mock fixture distinctly from
+    S5a's original implementation call, which is always attempt 1.
+    """
+    fix_spec = StageSpec(
+        stage_id=StageId.S5A_IMPLEMENT,
+        owner_profile="developer",
+        commit_strategy=CommitStrategy.NONE,
+    )
+    runner = StageRunner(
+        executor=resources.executor,
+        event_log=resources.event_log,
+        clock=lambda: datetime.now(UTC),
+        gates=StageGates(),
+        commit_hook=no_op_commit,
+    )
+    result = runner.run(
+        StageRunRequest(
+            spec=fix_spec,
+            run_id=resources.ref.run_id,
+            scenario_id=graph_state.scenario_id,
+            workspace_path=resources.workspace,
+            rendered_prompt=commit_label,
+            timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
+            budget_usd=DEFAULT_STAGE_BUDGET_USD,
+            attempt=attempt + 1,
+        )
+    )
+    graph_state.agent_call_count += 1
+    if result.status is StageStatus.PASSED:
+        commit_all(resources.workspace, commit_label)
+
+
+def _invalidate(graph_state: GraphState, stage_id: StageId, attempts: int = 0) -> None:
+    graph_state.stages[stage_id] = StageResult(
+        stage_id=stage_id, status=StageStatus.INVALIDATED, attempts=attempts
+    )
+
+
+def _handle_stage_failure(
+    resources: _LoopResources,
+    graph_state: GraphState,
+    spec: StageSpec,
+    attempts: int,
+    retry_limits: RetryLimits,
+) -> None:
+    """A stage's own agent call failed (invalid output / error / timeout, or a
+    gate rejected its output). S6 gets a fix call before its next attempt
+    (G-13); every other stage (including S7b failing outright, as opposed to
+    passing with findings — handled separately) just retries the same call —
+    it stays FAILED here and `_next_ready_batch` naturally re-selects it next
+    iteration, since a FAILED stage is never treated as already-passed.
+    """
+    max_attempts = _max_attempts_for(spec.stage_id, retry_limits)
+    if attempts >= max_attempts:
+        _fallback_to_human(
+            resources,
+            graph_state,
+            spec.stage_id,
+            attempts,
+            f"{spec.stage_id.value} failed after {attempts} attempt(s)",
+        )
+        return
+    if spec.stage_id is StageId.S6_VERIFY:
+        _run_fix_call(
+            resources, graph_state, "S5a-fix: address S6 verification failure", attempts
+        )
+
+
+def _handle_s7b_findings(
+    resources: _LoopResources,
+    graph_state: GraphState,
+    attempts: int,
+    retry_limits: RetryLimits,
+) -> None:
+    """S7b passed its own call but reported high-severity findings (G-15): a
+    fix call, then S6/S7a/S7b are all invalidated and re-run — not just S7b —
+    since a findings-driven fix can change the API surface S7a already
+    documented (matching C11-AC2's invalidation principle).
+    """
+    max_attempts = retry_limits.s7b_findings_max_attempts
+    if attempts >= max_attempts:
+        _fallback_to_human(
+            resources,
+            graph_state,
+            StageId.S7B_REVIEW,
+            attempts,
+            f"S7b reported high-severity findings after {attempts} attempt(s)",
+        )
+        return
+    _run_fix_call(
+        resources, graph_state, "S5a-fix: address S7b review findings", attempts
+    )
+    _invalidate(graph_state, StageId.S6_VERIFY)
+    _invalidate(graph_state, StageId.S7A_DOCS)
+    _invalidate(graph_state, StageId.S7B_REVIEW, attempts=attempts)
+
+
 def _record_batch_result(
     resources: _LoopResources,
     graph_state: GraphState,
     batch_result: BatchResult,
     policies: tuple[Policy, ...],
-) -> StageStatus:
+    retry_limits: RetryLimits,
+) -> None:
     """Record one batch member's result (and, if applicable, its checkpoint
-    pause or run-completion) into `graph_state`. Runs only on the caller's own
-    thread, after every batch member has already finished — never called
-    concurrently, so no lock is needed here (unlike the work `run_batch` fans
-    out, which does need — and gets — serialization at the EventLog/git layers).
+    pause, retry, or run-completion) into `graph_state`. Runs only on the
+    caller's own thread, after every batch member has already finished —
+    never called concurrently, so no lock is needed here (unlike the work
+    `run_batch` fans out, which does need — and gets — serialization at the
+    EventLog/git layers). Never returns a status for the caller to check —
+    every outcome (pass, checkpoint, retry, exhaustion) is fully handled here,
+    via `graph_state.terminal_state`/`pending_checkpoint`.
     """
     spec = batch_result.spec
     result = batch_result.result
+    attempts = (
+        graph_state.stages.get(
+            spec.stage_id, StageResult(stage_id=spec.stage_id)
+        ).attempts
+        + 1
+    )
     graph_state.stages[spec.stage_id] = StageResult(
         stage_id=spec.stage_id,
         status=result.status,
-        attempts=1,
+        attempts=attempts,
         commits=(result.commit,) if result.commit else (),
     )
-    if result.status is not StageStatus.PASSED:
-        pass
+    graph_state.agent_call_count += 1
+    if result.status is StageStatus.PASSED:
+        graph_state.last_checkpoint_commit = current_commit_or_empty_tree(
+            resources.workspace
+        )
+
+    is_s7b_findings = (
+        spec.stage_id is StageId.S7B_REVIEW
+        and result.status is StageStatus.PASSED
+        and result.response.high_severity_findings
+    )
+    if is_s7b_findings:
+        _handle_s7b_findings(resources, graph_state, attempts, retry_limits)
+    elif result.status is not StageStatus.PASSED:
+        _handle_stage_failure(resources, graph_state, spec, attempts, retry_limits)
     elif spec.stage_id is StageId.S6_VERIFY:
         if not _evaluate_s6_policies(resources, graph_state, policies):
             _complete_if_all_stages_passed(graph_state)
@@ -328,7 +531,40 @@ def _record_batch_result(
         )
     else:
         _complete_if_all_stages_passed(graph_state)
-    return result.status
+
+
+def _check_safe_stop_limits(
+    resources: _LoopResources, graph_state: GraphState, reliability: ReliabilityLimits
+) -> bool:
+    """C9 safe-stop: max agent calls, or max run duration, exceeded -> stop
+    (not a retry-exhaustion fallback — a safety cap, always terminal STOPPED,
+    with no partial commit left behind since it's checked between batches,
+    never mid-stage). Returns whether it stopped the run. A no-op if the run
+    already reached a terminal state this same batch (e.g. COMPLETED) —
+    safe-stop must never overwrite a legitimate outcome that just happened.
+    """
+    if graph_state.terminal_state is not None:
+        return False
+    if graph_state.agent_call_count > reliability.max_agent_calls:
+        reason = f"max_agent_calls ({reliability.max_agent_calls}) exceeded"
+    elif (
+        graph_state.started_at is not None
+        and (datetime.now(UTC) - graph_state.started_at).total_seconds()
+        > resources.max_run_duration_seconds
+    ):
+        reason = "max run duration exceeded"
+    else:
+        return False
+    graph_state.terminal_state = RunState.STOPPED
+    resources.event_log.append(
+        EventDraft(
+            run_id=resources.ref.run_id,
+            event_type=EventType.STOP,
+            recorded_at=datetime.now(UTC),
+            payload={"reason": reason},
+        )
+    )
+    return True
 
 
 def drive(
@@ -336,19 +572,26 @@ def drive(
     executor: Executor,
     max_run_duration_seconds: float,
     policies: tuple[Policy, ...] = (),
+    reliability: ReliabilityLimits = DEFAULT_RELIABILITY_LIMITS,
 ) -> DriveResult:
     """Reload state from disk; loop ready-stage batches until paused, terminal,
-    a stage fails, or the graph is exhausted. A batch is usually one stage, but
-    is two when a pair of parallel siblings (S5a+S5b, S7a+S7b) both become ready
-    at once — engine/scheduler.py runs those concurrently (T6.1). State is
-    persisted after every batch (not just at the end) so a process killed
-    mid-loop leaves graph.json consistent with events.jsonl, not stale.
+    or the graph is exhausted. A batch is usually one stage, but is two when a
+    pair of parallel siblings (S5a+S5b, S7a+S7b) both become ready at once —
+    engine/scheduler.py runs those concurrently (T6.1). State is persisted
+    after every batch (not just at the end) so a process killed mid-loop
+    leaves graph.json consistent with events.jsonl, not stale.
 
-    `policies` defaults to empty (no S6 policy checks at all) rather than
-    loading `config/defaults.toml` itself — that would make this function's
-    behavior depend on the current working directory. Real usage (the CLI
-    commands) explicitly passes `policies.registry.build_default_policies()`;
-    tests that don't care about S6's policies (most of them) need no changes.
+    A stage failing no longer breaks the loop outright (T7.1): bounded retries
+    (invalid-output/S6-failure/S7b-findings, C9) are handled entirely inside
+    `_record_batch_result` — a still-retryable failure leaves the stage FAILED
+    so `_next_ready_batch` re-selects it next iteration; exhaustion sets
+    `terminal_state = FAILED` itself, which is what actually stops this loop.
+
+    `policies` defaults to empty (no S6 policy checks at all) and `reliability`
+    defaults to safe built-in numbers (not `config/defaults.toml`'s own, so
+    this function stays independent of the current working directory). Real
+    usage (the CLI commands) passes `policies.registry.build_default_policies()`
+    and could override `reliability` the same way if it ever needs to.
     """
     ref = request.ref
     acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
@@ -370,6 +613,8 @@ def drive(
             # policy check diffs the whole run's own changes, not the target
             # repo's entire history.
             graph_state.base_commit = current_commit_or_empty_tree(workspace)
+        if graph_state.started_at is None:
+            graph_state.started_at = datetime.now(UTC)
         resources = _LoopResources(
             ref=ref,
             executor=executor,
@@ -377,6 +622,7 @@ def drive(
                 run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
             ),
             workspace=workspace,
+            max_run_duration_seconds=max_run_duration_seconds,
         )
 
         ran_stages: list[StageId] = []
@@ -392,16 +638,19 @@ def drive(
                 build_runner=lambda spec: _build_runner(resources, spec),
                 build_request=lambda spec: _build_request(resources, graph_state, spec),
             )
-            statuses = [
-                _record_batch_result(resources, graph_state, batch_result, policies)
-                for batch_result in batch_results
-            ]
+            for batch_result in batch_results:
+                _record_batch_result(
+                    resources,
+                    graph_state,
+                    batch_result,
+                    policies,
+                    reliability.retry_limits,
+                )
             ran_stages.extend(
                 batch_result.spec.stage_id for batch_result in batch_results
             )
+            _check_safe_stop_limits(resources, graph_state, reliability)
             atomic_write_json(_state_path(ref), graph_state)
-            if any(status is not StageStatus.PASSED for status in statuses):
-                break
 
         return DriveResult(ran_stages=tuple(ran_stages), graph_state=graph_state)
     finally:
@@ -491,6 +740,41 @@ def stop_run(ref: RunRef, reason: str, max_run_duration_seconds: float) -> Graph
         graph_state.pending_checkpoint = None
         graph_state.terminal_state = RunState.STOPPED
         atomic_write_json(_state_path(ref), graph_state)
+        return graph_state
+    finally:
+        release_lock(ref.orch_home, ref.project)
+
+
+def rollback_to_checkpoint(ref: RunRef, max_run_duration_seconds: float) -> GraphState:
+    """Reset the workspace to `graph_state.last_checkpoint_commit` (T7.1,
+    G-14) — the most recently recorded checkpoint, not necessarily the most
+    recent commit, since several stages commit 0 times (S2, S6, S7b). A
+    manual recovery action, not auto-invoked by the retry loop: it discards
+    uncommitted work, so it's for a human who has decided the workspace is
+    beyond fixing forward, not a step drive() takes on its own.
+
+    Raises NoCheckpointRecordedError if no stage's exit gate has passed yet.
+    """
+    acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
+    try:
+        graph_state = _load_existing_graph_state(ref)
+        if graph_state.last_checkpoint_commit is None:
+            raise NoCheckpointRecordedError(ref.run_id)
+
+        workspace = workspace_dir(ref.orch_home, ref.project, ref.run_id)
+        rollback_to(workspace, graph_state.last_checkpoint_commit)
+
+        event_log = EventLog(
+            run_dir(ref.orch_home, ref.project, ref.run_id) / EVENTS_FILENAME
+        )
+        event_log.append(
+            EventDraft(
+                run_id=ref.run_id,
+                event_type=EventType.ROLLBACK,
+                recorded_at=datetime.now(UTC),
+                payload={"checkpoint_commit": graph_state.last_checkpoint_commit},
+            )
+        )
         return graph_state
     finally:
         release_lock(ref.orch_home, ref.project)

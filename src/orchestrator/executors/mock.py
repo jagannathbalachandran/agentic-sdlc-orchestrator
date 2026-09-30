@@ -52,6 +52,7 @@ class MockExecutor:
             summary=str(fixture.get("summary", "")),
             produced_ids=tuple(fixture.get("produced_ids", ())),
             files_written=tuple(fixture.get("files_written", ())),
+            high_severity_findings=tuple(fixture.get("high_severity_findings", ())),
             duration_seconds=0.0,
         )
 

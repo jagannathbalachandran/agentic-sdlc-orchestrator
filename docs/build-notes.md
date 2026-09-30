@@ -897,3 +897,119 @@ gate: 210 tests, 97.14% coverage.
 - `stage_commit_hook`'s commit messages remain minimal; T8.1 still owns real
   trailer formatting.
 
+## T7.1 — Bounded retries, rollback, safe-stop
+
+**What changed:**
+- `engine/fsm.py`: a failing stage no longer breaks `drive()`'s loop outright.
+  `_record_batch_result` now computes each stage's real attempt count (it was
+  hardcoded to `1` before this task) and routes a non-PASSED result to
+  `_handle_stage_failure`: if attempts remain, the stage is simply left
+  `FAILED` and `_next_ready_batch` naturally re-selects it next iteration (no
+  bespoke "retry this one stage" path needed — reusing the existing
+  batch-selection machinery); if exhausted, `_fallback_to_human` sets
+  `terminal_state = FAILED` (C9: "pause for the human... end as failed", not a
+  silent stop) with a `stop` event carrying the attempt count and reason.
+  `ReliabilityLimits` (new, bundling `RetryLimits` + `max_agent_calls`) is a
+  new `drive()` param defaulting to safe built-in numbers matching
+  `config/defaults.toml`'s own (2/3/2, 60) — same "stay cwd-independent"
+  reasoning as T6.2's `policies` param; nothing wires a real-config-loaded
+  version into the CLI yet since none of the 4 commands needed to override the
+  defaults this task.
+- Three separate bounded-retry counts, per C9/G-13/G-15: `S6` gets
+  `s6_failure_max_attempts` (3) and, before each retry, **one fix call**
+  (`_run_fix_call` — a synthetic S5a-shaped developer call, `commit_hook=
+  no_op_commit` + an explicit `commit_all` afterward so it's never attributed
+  to `stage_commit_hook`'s normal per-stage commit) rather than a full S5a
+  re-run (G-13); `S7b` gets `s7b_findings_max_attempts` (2), triggered not by
+  `StageStatus.FAILED` but by `AgentCallResponse.high_severity_findings` being
+  non-empty *even when the call itself PASSED* (S7b can succeed as a call
+  while still reporting a problem) — its fix call additionally invalidates
+  **S6, S7a and S7b** (`_invalidate`, `StageStatus.INVALIDATED`), not just
+  S7b, since a findings-driven fix can change what S7a already documented
+  (G-15, mirroring C11-AC2). Everything else gets `invalid_output_max_attempts`
+  (2) with no fix call — a plain same-stage retry. `_max_attempts_for` picks
+  the count; there's no real per-outcome signal today distinguishing "invalid
+  output" from any other generic failure, so that count is used for every
+  non-S6/S7b stage uniformly (documented limitation, not silently assumed).
+- `AgentCallResponse` gained `high_severity_findings: tuple[str, ...] = ()`
+  (mirrored into `MockExecutor`/`RealExecutor`'s response construction, and
+  the reviewer profile's own output contract) — S7b's real trigger signal,
+  not inferred from parsing `04-review-findings.md`.
+- `GraphState` gained `started_at`, `last_checkpoint_commit`, and
+  `agent_call_count`. `last_checkpoint_commit` is updated in
+  `_record_batch_result` for **every** `PASSED` stage regardless of whether it
+  committed (G-14: "record an explicit checkpoint... whether or not that
+  stage itself committed" — several stages commit 0 times). `started_at` is
+  captured once, at a run's first `drive()` call, for the new safe-stop
+  duration check; `agent_call_count` increments once per real executor call
+  (including fix calls) for the new safe-stop call-count check.
+- `_check_safe_stop_limits` (C9): runs once per batch, after
+  `_record_batch_result`; stops the run (`terminal_state = STOPPED` + a `stop`
+  event naming the trigger) if `agent_call_count` or elapsed wall-clock time
+  exceeds `reliability`'s limits. Guarded against overwriting a
+  `terminal_state` a stage's own completion/checkpoint logic *just* set in the
+  same batch (a real bug caught while writing its own test: a 2-stage stub
+  graph's last stage both completing the run *and* tripping the call-count
+  cap in the same batch would otherwise have silently replaced `COMPLETED`
+  with `STOPPED`).
+- `engine/scheduler.py`: `run_batch` now catches `StageGateFailure` (a gate
+  rejection) and converts it to a `FAILED` `StageRunResult` instead of letting
+  it propagate as an uncaught exception — this was a real, previously-latent
+  gap (never exercised, since every gate is still a stub that always passes)
+  that would have silently crashed `drive()` the first time any gate ever
+  failed; T7.1's retry logic needs every failure mode to reach it uniformly.
+  `StageRunner.run()` itself still raises `StageGateFailure` (its documented,
+  directly-tested contract) — only this one calling layer catches it.
+- `workspace/git_ops.py`: `rollback_to` now also runs `git clean -fd` after
+  `git reset --hard` — `reset --hard` alone leaves untracked files behind
+  (correct git behavior, but not what "reset to the checkpoint" should mean
+  here — an agent's stray uncommitted file isn't "at the checkpoint" either).
+  `git clean` still respects `.gitignore` (no `-x`), so the workspace venv and
+  other ignored build artifacts are never touched.
+- `engine/fsm.py`: new `rollback_to_checkpoint(ref, max_run_duration_seconds)`
+  — a manual recovery action (not auto-invoked by the retry loop, since it
+  discards work and that's a human's call to make), resetting the workspace to
+  `graph_state.last_checkpoint_commit`. Raises the new
+  `NoCheckpointRecordedError` if nothing has ever passed yet.
+- Two more real, previously-latent bugs this task's own tests caught (not new
+  code from this task, but blocking it): `policies/base.py`'s `compute_diff`
+  used a literal `git rev-parse HEAD`/`git diff ... HEAD`, which fails on a
+  workspace with zero commits (S6 can legitimately run with none, if every
+  upstream stage in a given graph has `commit_strategy=NONE`) — fixed by
+  routing through `current_commit_or_empty_tree` like T6.1/T6.2's other
+  zero-commit-safe call sites. Separately, `_build_request` never actually
+  read the stage's current attempt count from `graph_state` — every call used
+  the `StageRunRequest.attempt` default of `1`, meaning a retried stage's mock
+  fixture lookup could never key off a real second attempt; without this fix,
+  none of this task's own retry-success tests could pass a stage on its
+  second try.
+
+**Covered:** C9-AC1, C9-AC2, C9-AC3, C9-AC5; G-13; G-14; G-15.
+
+**Tests:** `tests/unit/engine/test_fsm.py` — one test per bounded loop hitting
+its max (generic/S0, S6, and the safe-stop cap) and one proving a successful
+retry for each of S6 (fix call → passes) and S7b (fix call → S6/S7a/S7b
+invalidated and re-run → clean second pass completes the run), all asserting
+`attempts`, `ran_stages` repetition, and the `stop`/`policy_result` event
+payloads carry full context (reason, attempt count). A rollback test
+(uncommitted stray file discarded, workspace lands exactly on the recorded
+checkpoint commit) and a `NoCheckpointRecordedError` test. The pre-existing
+"stage failure stops the loop" test (T3.2-era, explicitly about the *absence*
+of retry logic) was rewritten to prove the *bounded* retry-then-fallback
+behavior instead, since its original premise no longer holds. Full gate: 216
+tests, 96.94% coverage.
+
+**Deferred / assumed:**
+- Full structured commit trailers for fix-call commits (`Stage: S5a-fix` +
+  `Task`/`FR`, as G-13 specifies) are still just a distinguishable commit
+  *message* — T8.1 owns real trailer formatting, same deferral as T6.1's
+  `stage_commit_hook`.
+- `ReliabilityLimits` isn't yet wired into any CLI command with a
+  config-loaded (non-default) value — none of the 4 commands needed one this
+  task; the same `policies.registry`-style factory would be the natural place
+  if that's ever needed.
+- `rollback_to_checkpoint` is deliberately not auto-invoked anywhere (not
+  after a fallback-to-human, not on `stop`) — G-14 describes the mechanism,
+  not when to use it automatically, and discarding work automatically felt
+  like the wrong default to assume without a clearer spec signal.
+

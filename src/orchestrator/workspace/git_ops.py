@@ -164,3 +164,15 @@ def ensure_on_branch(path: Path, branch_name: str) -> None:
         run_git(path, "checkout", "-q", branch_name)
     else:
         create_branch(path, branch_name)
+
+
+def rollback_to(path: Path, commit_sha: str) -> None:
+    """Reset the workspace to `commit_sha` exactly (T7.1, G-14's checkpoint
+    rollback) — discards any commits after it, any uncommitted changes to
+    tracked files, *and* any untracked files `git reset --hard` alone would
+    leave behind (an agent's stray new file isn't "at the checkpoint" either).
+    `git clean` still respects .gitignore (no `-x`), so it never touches the
+    workspace venv or other ignored build artifacts.
+    """
+    run_git(path, "reset", "--hard", commit_sha)
+    run_git(path, "clean", "-fd")
