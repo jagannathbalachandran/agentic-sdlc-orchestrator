@@ -24,6 +24,8 @@ rules = [
     "Every DD must define concrete contracts, not prose alone.",
     "Never modify files under src/ or tests/.",
     "Format 02-design.md as one '## DD-n' heading per decision, followed immediately by a 'Cites: FR-n[, FR-n...]' line naming every FR it satisfies.",
+    "02-design.md must include a '## Technology stack' section naming the language and version, HTTP framework, test client, and any new dependencies with version bounds. Greenfield (no existing codebase): use the approved template's stack (Python 3.11+). Existing codebase: use the stack identified in S2's impact analysis — never introduce a new language or framework. Interface sketches must be written in the project's own language, not a different one.",
+    "If this design was rejected with feedback, revise 02-design.md to actually address that feedback — do not resubmit the same content or reply with prose instead of doing the work.",
 ]
 
 output_contract = """
