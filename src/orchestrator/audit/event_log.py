@@ -17,6 +17,19 @@ from orchestrator.models.events import Event, EventDraft
 GENESIS_HASH = "0" * 64
 
 
+def read_events(path: Path) -> list[Event]:
+    """Read every event from an events.jsonl file, in order (module-level so
+    metrics/report generation can read a log without constructing an
+    `EventLog` — they only ever read, never append)."""
+    if not path.is_file():
+        return []
+    return [
+        Event.model_validate_json(line)
+        for line in path.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+
+
 def _canonical_json(draft: EventDraft, prev_hash: str) -> str:
     return json.dumps(
         {
@@ -85,6 +98,10 @@ class EventLog:
             self._next_sequence = sequence + 1
             self._last_hash = event_hash
             return event
+
+    def read_all(self) -> list[Event]:
+        """Read every event in the log, in order (metrics/report generation)."""
+        return read_events(self._path)
 
     def verify(self) -> bool:
         """Recompute the whole chain; False on any tamper, gap, or deletion."""

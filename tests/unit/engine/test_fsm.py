@@ -210,6 +210,22 @@ def test_drive_loops_through_multiple_stages_in_one_call_when_nothing_pauses_it(
     assert result.graph_state.terminal_state is RunState.COMPLETED
 
 
+def test_drive_records_a_run_terminal_event_when_it_completes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """C13-AC1: metrics are computed from events only, so reaching COMPLETED
+    must itself be an event (T8.2) — not just a graph.json field."""
+    monkeypatch.setattr("orchestrator.engine.fsm.GRAPH", _stub_graph_no_checkpoint())
+    request = _request(tmp_path)
+
+    drive(request, executor=MockExecutor(FIXTURES_ROOT), max_run_duration_seconds=3600)
+
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    terminal_events = [e for e in events if e["event_type"] == "run_terminal"]
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["payload"] == {"terminal_state": "completed"}
+
+
 def test_drive_retries_a_failing_stage_up_to_its_bounded_limit_then_falls_back_to_human(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -427,6 +443,11 @@ def test_resolve_checkpoint_reject_final_ends_the_run_as_rejected(
     result = drive(request, executor=executor, max_run_duration_seconds=3600)
     assert result.ran_stages == ()
     assert result.graph_state.terminal_state is RunState.REJECTED
+
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    terminal_events = [e for e in events if e["event_type"] == "run_terminal"]
+    assert len(terminal_events) == 1
+    assert terminal_events[0]["payload"] == {"terminal_state": "rejected"}
 
 
 def test_resolve_checkpoint_raises_when_nothing_is_pending(

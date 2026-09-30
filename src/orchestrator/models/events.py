@@ -22,6 +22,7 @@ class EventType(StrEnum):
     ROLLBACK = "rollback"
     STOP = "stop"
     FAULT_INJECTED = "fault_injected"
+    RUN_TERMINAL = "run_terminal"
 
 
 class EventDraft(BaseModel):

@@ -1264,3 +1264,110 @@ plus unknown-commit and no-task-trailer edge cases. Full gate: 240 tests,
   `traceability.md` anywhere yet — consistent with the "Join S7 doesn't exist
   as a stage" boundary above.
 
+## T8.2 — Metrics + reporting
+
+**What changed:**
+- **Prerequisite bug found while designing this task (C13-AC1):**
+  `metrics.json` must be "computed from events only," but reaching
+  `RunState.COMPLETED` or `RunState.REJECTED` emitted *no event at all* —
+  only `STOPPED`/`FAILED` did (via the pre-existing `stop` event from
+  safe-stop/fallback-to-human). A run's own success/failure was therefore
+  undecidable from `events.jsonl` alone, contradicting the very AC this task
+  exists to satisfy. Fixed first: `EventType` gained `RUN_TERMINAL =
+  "run_terminal"`; `engine/fsm.py` gained `_record_run_terminal` (appends the
+  event) and `_complete_and_record` (wraps `_complete_if_all_stages_passed`,
+  emitting the event only on an actual None -> COMPLETED transition, keyed
+  off "was `terminal_state` still `None` before the call"). All 3 raw
+  `_complete_if_all_stages_passed(...)` call sites now go through
+  `_complete_and_record(...)` instead; `resolve_checkpoint`'s `REJECT_FINAL`
+  branch calls `_record_run_terminal(..., RunState.REJECTED)` directly right
+  after setting `terminal_state`. Every terminal state now has exactly one
+  event that names it — `stop` for STOPPED/FAILED, `run_terminal` for
+  COMPLETED/REJECTED.
+- `audit/event_log.py` gained a module-level `read_events(path) -> list[Event]`
+  (mirrors `approvals_log.read_approvals`/`decisions_log.read_decisions` —
+  empty list for a missing file, one `Event.model_validate_json` per line)
+  and `EventLog.read_all()` as a thin instance-method wrapper over it, so
+  metrics/report code can read a finished run's log without needing to
+  construct an `EventLog` purely to read (it only ever appends otherwise).
+- `audit/metrics.py` (new): `compute_metrics(events: list[Event]) -> Metrics`,
+  pure and computed from `events` alone (C13-AC1), covering every C13 figure:
+  - `run_success`: `True`/`False`/`None` (no terminal event yet) from the
+    first `run_terminal`/`stop` event seen.
+  - `stage_first_pass_rate`: fraction of stages whose `attempt == 1` call
+    passed, over every stage with a first attempt recorded.
+  - `retry_count`/`rollback_count`: straight counts of `retry`/`rollback`
+    events.
+  - `mttr_seconds`: mean, over every stage that both failed and later
+    recovered, of (next success's finish time) - (first failure's finish
+    time); `None` if no stage did both.
+  - `end_to_end_latency_seconds`: last event's timestamp minus the first's.
+  - `human_wait_seconds`: sum of every `approval_requested` -> next
+    `approval_recorded` gap.
+  - `end_to_end_latency_excluding_human_wait_seconds`: the above two,
+    subtracted — C13's "with and without human wait" pair.
+  - `stage_latency_seconds` / `agent_call_latency_seconds`: built from pairing
+    every `stage_started`/`stage_finished` by `(stage, attempt)`. One such
+    pair *is* one agent call (`StageRunner.run()` makes exactly one executor
+    call per invocation, `engine/runner.py`) — so `agent_call_latency_seconds`
+    is keyed `"{stage}:{attempt}"` per call, and `stage_latency_seconds` is
+    that stage's attempts summed (its total wall-clock cost across every
+    retry, not just the winning attempt). This is a judgment call: C13 lists
+    "stage and agent-call latency" as one bullet without defining the
+    difference between the two; treating agent-call as the atomic per-attempt
+    figure and stage as its sum is the only reading consistent with how the
+    codebase actually structures one call per attempt.
+  - `metrics_to_model(Metrics) -> MetricsModel`: the pydantic-model bridge
+    `audit/run_record.py`'s `atomic_write_json` needs (it requires a
+    `BaseModel`; `Metrics` itself is a plain frozen dataclass, kept that way
+    so the computation functions stay pydantic-free).
+- `audit/report.py` (new): `generate_report(GraphState, Metrics) -> str` — a
+  markdown `report.md`: run ID/scenario/outcome, a per-stage status/attempts/
+  commits table (from `GraphState.stages`, no event parsing needed here),
+  and a metrics table.
+- `audit/pr_description.py` (new): `generate_pr_description(GraphState,
+  run_record_location, audit_repo_url=None) -> str` — C12-AC5's literal ask:
+  identifies the run by ID and names its record's location; adds an audit-repo
+  link only when one is given (AC4/AC5's central-repo publishing is itself a
+  SHOULD, not built yet, so the link is optional input, not a hard dependency).
+  Lists every commit the run made (from `GraphState.stages`, same source as
+  the report).
+
+**Not done — deliberately, matching this task's own DoD:** no CLI/`drive()`
+wiring writes `metrics.json`/`report.md`/`pr-description.md` to a run
+directory yet. The DoD asked for computation "from a scripted synthetic
+`events.jsonl`," not for a write-to-run-folder integration; `run.json`
+creation itself is still the pre-existing, separately-tracked deferred item
+(`engine/fsm.py`'s own module docstring). These three modules are the pure,
+fully-tested generators, ready for whichever future task wires them to a
+real run's files.
+
+**Covered:** C13, C13-AC1, C12-AC5.
+
+**Tests:** `tests/unit/audit/test_metrics.py` (7 tests) — the DoD's own
+scripted scenario (S1 passes first try; S2 fails then passes on retry, with
+a `retry` event in between; a Change-control approval blocks for 60s; S3
+passes first try; the run completes), built through a real `EventLog` (not
+hand-built `Event` objects) so the test exercises the same hash-chained
+read path metrics will actually see, asserting every one of C13's figures
+against hand-computed expected values (`mttr_seconds == 20.0`,
+`stage_first_pass_rate == 2/3`, `human_wait_seconds == 60.0`, etc.); plus a
+no-events-at-all case (everything `None`/zero, nothing raises), a
+`stop`-event-means-failure case, a rollback-count case, and a
+`metrics_to_model` round-trip case. `tests/unit/audit/test_report.py` (4
+tests) and `tests/unit/audit/test_pr_description.py` (5 tests) cover their
+respective generators' key content (identity, per-stage rows, the
+metrics/commits sections, the optional audit-repo link). `tests/unit/audit/
+test_event_log.py` gained 2 tests for `read_all`/`read_events`.
+`tests/unit/engine/test_fsm.py` gained 2 tests proving `run_terminal` is
+actually recorded (once for COMPLETED, once for REJECTED) — the prerequisite
+fix this task started with. Full gate: 257 tests, 97.35% coverage.
+
+**Deferred / assumed:**
+- Writing `metrics.json`/`report.md`/`pr-description.md` into a run's own
+  directory (and generating them automatically at run-completion time) is
+  not wired anywhere yet — see "Not done" above.
+- `audit_repo_url`/central-audit-repo publishing (C12-AC4) doesn't exist as a
+  real capability anywhere in the codebase yet; `pr_description.py`'s param
+  for it is accordingly optional, not backed by a real publisher.
+

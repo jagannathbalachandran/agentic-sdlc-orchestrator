@@ -217,6 +217,34 @@ def _complete_if_all_stages_passed(graph_state: GraphState) -> None:
         graph_state.terminal_state = RunState.COMPLETED
 
 
+def _record_run_terminal(
+    event_log: EventLog, run_id: str, terminal_state: RunState
+) -> None:
+    """C13-AC1: metrics are computed from events only. STOPPED/FAILED already
+    get their own event (a `stop` event, from safe-stop/fallback-to-human);
+    COMPLETED and REJECTED didn't get any event at all before this — this is
+    that event, for whichever of the two just happened.
+    """
+    event_log.append(
+        EventDraft(
+            run_id=run_id,
+            event_type=EventType.RUN_TERMINAL,
+            recorded_at=datetime.now(UTC),
+            payload={"terminal_state": terminal_state.value},
+        )
+    )
+
+
+def _complete_and_record(
+    graph_state: GraphState, event_log: EventLog, run_id: str
+) -> None:
+    """`_complete_if_all_stages_passed`, plus recording the transition."""
+    was_incomplete = graph_state.terminal_state is None
+    _complete_if_all_stages_passed(graph_state)
+    if was_incomplete and graph_state.terminal_state is RunState.COMPLETED:
+        _record_run_terminal(event_log, run_id, RunState.COMPLETED)
+
+
 def _next_ready_batch(graph_state: GraphState) -> tuple[StageSpec, ...]:
     """Every not-yet-passed stage whose dependencies are all satisfied.
 
@@ -647,7 +675,7 @@ def _record_batch_result(
         _handle_stage_failure(resources, graph_state, spec, attempts, retry_limits)
     elif spec.stage_id is StageId.S6_VERIFY:
         if not _evaluate_s6_policies(resources, graph_state, policies):
-            _complete_if_all_stages_passed(graph_state)
+            _complete_and_record(graph_state, resources.event_log, resources.ref.run_id)
     elif spec.checkpoint_after is not None:
         graph_state.pending_checkpoint = spec.checkpoint_after
         resources.event_log.append(
@@ -660,7 +688,7 @@ def _record_batch_result(
             )
         )
     else:
-        _complete_if_all_stages_passed(graph_state)
+        _complete_and_record(graph_state, resources.event_log, resources.ref.run_id)
 
 
 def _check_safe_stop_limits(
@@ -840,6 +868,7 @@ def resolve_checkpoint(
         graph_state.pending_checkpoint = None
         if decision is ApprovalDecision.REJECT_FINAL:
             graph_state.terminal_state = RunState.REJECTED
+            _record_run_terminal(event_log, ref.run_id, RunState.REJECTED)
         elif (
             decision is ApprovalDecision.REJECT
             and checkpoint is ApprovalCheckpointKind.DESIGN
@@ -905,7 +934,7 @@ def resolve_checkpoint(
             # pending can complete the run (D-14) — drive()'s own completion
             # check never runs for S8 since it takes the checkpoint branch, not
             # the "stage passed with no checkpoint" branch.
-            _complete_if_all_stages_passed(graph_state)
+            _complete_and_record(graph_state, event_log, ref.run_id)
         atomic_write_json(_state_path(ref), graph_state)
         return graph_state
     finally:
