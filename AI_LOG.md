@@ -1,6 +1,48 @@
 # AI Log — Agentic SDLC Orchestrator
 Primary tools: Claude chat (design discussion and review), Claude Code (implementation)
 
+## Summary
+
+**How the work was split**
+- **Me, in consultation with Claude chat:** requirements, architecture and
+  scope decisions, and review at every stage. Deliberately spent more time up
+  front on detailed requirements (~3h) so the build could run with bounded
+  agent autonomy and clear acceptance criteria.
+- **Claude Code:** analysis, architecture proposal, ADR draft, and the
+  implementation, task by task, with tests and per-task commits.
+- **Me:** approving at three hard stops, verifying locally, target-repo
+  setup (A1 kept untouched), acting as approver in the showcase runs.
+
+**Major decisions (made in consultation with Claude chat)**
+- Orchestrator and target projects in separate repos; platform team owns the
+  global rules, project teams only supply scenarios and config.
+- One fixed stage graph (S0–S8) with entry/exit gates, parallel S5/S7
+  branches and four approval checkpoints; agents work inside stages, the
+  orchestrator controls everything between them.
+- Full traceability: frozen requirement → FRs → design decisions → tasks →
+  per-task commits with git trailers → tests; hash-chained event log.
+- Design approach (ADR-001): custom lightweight engine, flat JSON files,
+  TOML config, threads for parallel stages, stateless pause/resume across
+  CLI commands, layer-oriented code layout.
+- Agents write files with their own tools and return a small JSON summary;
+  workspace confinement enforced by a post-stage check, since the CLI's own
+  restriction proved not to be a hard boundary (spike finding).
+- Scope: a vertical slice that reaches real runs and all three scenarios,
+  rather than a mock-only build; specific items trimmed and listed as
+  limitations.
+
+**How oversight worked**
+Three hard stops (after the spike and ADR, after the core engine, before the
+showcase runs). Each review found real issues — e.g. unwired components,
+an unrecoverable fault-injection design, missing per-task commits — which
+were fixed before continuing. Details in the entries below.
+
+**Evidence**
+docs/requirements.md · docs/architecture-proposal.md · docs/adr/ADR-001 ·
+docs/spikes/ · docs/tasks.md · docs/build-notes.md (incl. integration
+audit) · evidence/runs/ (showcase runs) · commit trailers
+(`git log --format="%(trailers)"`)
+
 ## Setup — Repo scaffold
 - Copied T-01 scaffold files from assignment 1 and committed them unmodified
   ("Copy scaffold from assignment 1 (unmodified)") so the later adaptation is a
@@ -273,3 +315,54 @@ two code paths; later unified into a single function.
   brownfield, vague expiry text in ambiguous) and committed/pushed them myself.
 - Claude Code asked to read outside its working directory; I added the two
   target repos as working directories instead of allowing reads everywhere.
+
+## 2026-09-30 — Hard stop (c): T4–T9 review, integration audit, pre-T10 fixes
+
+**Built by Claude Code (T4–T9):** real executor + 7 agent profiles (live smoke
+and timeout tests passed), greenfield template, parallel S5/S7 join, policies,
+retries/rollback/safe-stop, design-rejection re-planning, clarification
+checkpoint, fault injection, traceability, metrics/report/PR description.
+
+**Claude Code findings:**
+- claude -p silently refuses writes under OS temp paths — workspaces must
+  live in normal directories.
+- Reaching COMPLETED/REJECTED emitted no event, so run success couldn't be
+  computed from events alone; added a RUN_TERMINAL event.
+- Flagged (without guessing) that the CLI still refused the real executor —
+  built and tested in T4 but never wired into run/approve/reject/answer.
+
+**Decision (reviewed in collaboration with Claude chat):** showcase runs go
+through the CLI, not a script calling the executor directly — a script would
+bypass approvals, policies and the event log, and graders can only reproduce
+the CLI.
+
+**Integration audit** (requested because a tested component had never been
+wired in): found S0/S6/S8 were stubs (S6 would have passed without running
+tests or coverage), profiles lacked the citation format the traceability
+gates expect, and run.json, push after release, workspace venv, the rollback
+command and the artifact writes were unwired. All fixed; added an end-to-end
+CLI test asserting every run artifact is produced.
+
+**Review of the audit's "not fixed" list (done in collaboration with Claude
+chat) — sent back before T10:**
+- S5a made one call and one commit for all tasks, so no per-task commits
+  and no working backward trace — core to the traceability design (D-8).
+  Now one call and one commit per plan task, with trailers.
+- Greenfield ran S2 despite §12 requiring it to be skipped. Now skipped with
+  a recorded reason.
+- With S6 now real, the injected fault could never be fixed (the developer
+  agent can't write to tests/acceptance/), so the brownfield retry demo would
+  end as failed. Changed to a defect in src/ that the fix call can repair;
+  still recorded as injected: true.
+- Accepted as documented limitations: flat file layout instead of
+  docs/requirements/REQ-…/, a single S6 gate running all checks via
+  check.py, run branches pushed to the local target clone (pushed to GitHub
+  manually), and a small lock gap between resolve and drive.
+
+**Boundary overstep:** while verifying the fixes, Claude Code ran a full mock
+run against the real greenfield target repo and pushed a branch into it (then
+deleted it) without asking — the target repos are human-owned. It disclosed
+this itself. Repo verified clean; Claude Code instructed to use throwaway
+repos for any further verification.
+
+**Result:** 283 tests, full gate green. Ready for T10.1.
