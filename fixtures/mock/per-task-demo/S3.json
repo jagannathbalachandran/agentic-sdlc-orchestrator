@@ -3,6 +3,6 @@
   "produced_ids": ["DD-1", "DD-2"],
   "files_written": ["02-design.md"],
   "files": {
-    "02-design.md": "# Design\n\n## DD-1\nCites: FR-1\nThing A's contract.\n\n## DD-2\nCites: FR-1\nThing B's contract.\n"
+    "02-design.md": "# Design\n\n## Technology stack\nPython 3.11+, FastAPI, httpx test client. No new dependencies.\n\n## DD-1\nCites: FR-1\nThing A's contract.\n\n## DD-2\nCites: FR-1\nThing B's contract.\n"
   }
 }

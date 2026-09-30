@@ -119,3 +119,5 @@ class GraphState(BaseModel):
     req_id: str = ""
     template_path: str | None = None
     executor_kind: ExecutorKind = ExecutorKind.MOCK
+    retry_cycle_start_attempts: dict[StageId, int] = Field(default_factory=dict)
+    design_rejection_feedback: str | None = None

@@ -86,11 +86,13 @@ from orchestrator.gates.base import Gate, StageContext
 from orchestrator.gates.command_gate import TestCoverageGate
 from orchestrator.gates.existence_gate import ExistenceGate
 from orchestrator.gates.schema_gate import SchemaGate
+from orchestrator.gates.technology_stack_gate import TechnologyStackGate
 from orchestrator.gates.traceability_gate import (
     DesignCitationGate,
     PlanCitationGate,
     RequirementsCitationGate,
 )
+from orchestrator.gates.unchanged_on_retry_gate import UnchangedOnRetryGate
 from orchestrator.models.agent_io import (
     AgentCallOutcome,
     AgentCallRequest,
@@ -264,12 +266,15 @@ def _gates_for(stage_id: StageId) -> StageGates:
     """Every stage gets the stub SchemaGate; S2 also gets the stub
     ExistenceGate on exit ("every referenced file/symbol exists", §7's S2
     exit-gate row); S1/S3/S4 get their real citation gate (T8.1, C10-AC1);
-    S6 gets the real command gate (D-11/AC5: tests pass, coverage >=
-    threshold — `gates/command_gate.py`).
+    S3 also gets the real technology-stack gate (item 6c); S6 gets the real
+    command gate (D-11/AC5: tests pass, coverage >= threshold — `gates/
+    command_gate.py`).
     """
     exit_gates: tuple[Gate, ...] = (SchemaGate(),)
     if stage_id is StageId.S2_CODEBASE_ANALYSIS:
         exit_gates = (*exit_gates, ExistenceGate())
+    if stage_id is StageId.S3_DESIGN:
+        exit_gates = (*exit_gates, TechnologyStackGate(), UnchangedOnRetryGate())
     if stage_id is StageId.S6_VERIFY:
         exit_gates = (*exit_gates, TestCoverageGate())
     traceability_gate = _traceability_gate_for(stage_id)
@@ -717,7 +722,11 @@ class _PerTaskS5aRunner(StageRunner):
                 self._record(
                     context,
                     EventType.STAGE_FINISHED,
-                    {"status": StageStatus.FAILED.value},
+                    {
+                        "status": StageStatus.FAILED.value,
+                        "outcome": response.outcome.value,
+                        "error": response.summary,
+                    },
                 )
                 return StageRunResult(
                     status=StageStatus.FAILED,
@@ -740,7 +749,13 @@ class _PerTaskS5aRunner(StageRunner):
             )
 
         self._record(
-            context, EventType.STAGE_FINISHED, {"status": StageStatus.PASSED.value}
+            context,
+            EventType.STAGE_FINISHED,
+            {
+                "status": StageStatus.PASSED.value,
+                "outcome": response.outcome.value,
+                "error": "",
+            },
         )
         return StageRunResult(
             status=StageStatus.PASSED,
@@ -756,7 +771,13 @@ class _PerTaskS5aRunner(StageRunner):
             duration_seconds=0.0,
         )
         self._record(
-            context, EventType.STAGE_FINISHED, {"status": StageStatus.FAILED.value}
+            context,
+            EventType.STAGE_FINISHED,
+            {
+                "status": StageStatus.FAILED.value,
+                "outcome": response.outcome.value,
+                "error": response.summary,
+            },
         )
         return StageRunResult(status=StageStatus.FAILED, response=response, commit=None)
 
@@ -797,7 +818,34 @@ _STAGE_TASKS: dict[StageId, str] = {
 }
 
 
-def _rendered_prompt_for(spec: StageSpec, graph_state: GraphState) -> str:
+def _technology_stack_instruction(workspace: Path) -> str:
+    """The target's real technology stack (item 6b, C4/§12) — read straight
+    from the workspace's own pyproject.toml, which is already the right one
+    by the time S3 runs (S0's own commit hook either copied it from the
+    greenfield template or cloned it from the existing target), so the
+    architect never has to guess a language/framework instead of reading
+    what's actually there. Falls back to naming the template's own stack
+    (Python 3.11+) only when there's genuinely no pyproject.toml to read —
+    a bare/no-target workspace (stub graphs, most unit tests).
+    """
+    pyproject_path = workspace / "pyproject.toml"
+    if pyproject_path.is_file():
+        content = pyproject_path.read_text(encoding="utf-8")
+        return (
+            "Use this project's existing technology stack — do not "
+            "introduce a new language or framework. Its pyproject.toml:\n\n"
+            f"{content}"
+        )
+    return (
+        "No pyproject.toml was found in the workspace; use Python 3.11+ "
+        "with a standard HTTP framework and test client, matching the "
+        "approved greenfield template's own stack."
+    )
+
+
+def _rendered_prompt_for(
+    spec: StageSpec, graph_state: GraphState, workspace: Path
+) -> str:
     if spec.stage_id is StageId.S1_REQUIREMENTS:
         prompt = (
             f"Requirement {graph_state.req_id}: {graph_text}"
@@ -812,7 +860,21 @@ def _rendered_prompt_for(spec: StageSpec, graph_state: GraphState) -> str:
                 f"{graph_state.clarification_answer}"
             )
         return prompt
-    return _STAGE_TASKS.get(spec.stage_id, f"stage {spec.stage_id.value}")
+    prompt = _STAGE_TASKS.get(spec.stage_id, f"stage {spec.stage_id.value}")
+    if spec.stage_id is StageId.S3_DESIGN:
+        prompt += f"\n\n{_technology_stack_instruction(workspace)}"
+        if graph_state.design_rejection_feedback:
+            # C11-AC1: the re-run after a Design rejection must actually
+            # receive the human's feedback (item 5/T9.7 — found missing
+            # entirely while diagnosing a real run: the previous design was
+            # never revised because the re-run got the exact same prompt as
+            # the first attempt, with no signal anything needed to change).
+            prompt += (
+                "\n\nThis design was REJECTED by a human reviewer with this "
+                f"feedback — revise 02-design.md to address it:\n"
+                f"{graph_state.design_rejection_feedback}"
+            )
+    return prompt
 
 
 def _build_request(
@@ -831,7 +893,7 @@ def _build_request(
         run_id=resources.ref.run_id,
         scenario_id=graph_state.scenario_id,
         workspace_path=resources.workspace,
-        rendered_prompt=_rendered_prompt_for(spec, graph_state),
+        rendered_prompt=_rendered_prompt_for(spec, graph_state, resources.workspace),
         timeout_seconds=resources.reliability.per_call_timeout_seconds,
         budget_usd=resources.reliability.budget_usd,
         attempt=next_attempt,
@@ -1011,13 +1073,22 @@ def _handle_stage_failure(
     """
     spec = batch_result.spec
     max_attempts = _max_attempts_for(spec.stage_id, retry_limits)
-    if attempts >= max_attempts:
+    # Attempts *since this stage's current retry cycle began* (T9.7/item 1) —
+    # `attempts` itself is the stage's whole-run total, used unchanged for
+    # event/fixture keying, but a rejection or Clarification answer
+    # (engine/replanning.py:invalidate_from) starts a fresh bounded-retry
+    # budget, so counting from the run's start here would let old, unrelated
+    # attempts eat into what should be a full allowance for the re-plan.
+    cycle_start = graph_state.retry_cycle_start_attempts.get(spec.stage_id, 0)
+    attempts_this_cycle = attempts - cycle_start
+    if attempts_this_cycle >= max_attempts:
         _fallback_to_human(
             resources,
             graph_state,
             spec.stage_id,
             attempts,
-            f"{spec.stage_id.value} failed after {attempts} attempt(s)",
+            f"{spec.stage_id.value} failed after {attempts_this_cycle} attempt(s) "
+            f"this retry cycle ({attempts} total)",
         )
         return
     if spec.stage_id is StageId.S6_VERIFY:
@@ -1469,7 +1540,27 @@ def resolve_checkpoint(
             # left untouched. Downstream stages are marked invalidated, not
             # re-run directly here — the existing batch-selection machinery
             # (engine/fsm.py's drive() loop) re-selects anything not PASSED.
+            # C11-AC1 requires the re-run to actually receive the feedback —
+            # persisted here so _rendered_prompt_for can include it in S3's
+            # next call (found missing entirely while diagnosing a real run,
+            # item 5/T9.7: the comment was recorded to approvals.jsonl but
+            # never reached the agent).
+            graph_state.design_rejection_feedback = comment
             invalidated = invalidate_from(graph_state, StageId.S3_DESIGN)
+            decisions_path = (
+                run_dir(ref.orch_home, ref.project, ref.run_id) / DECISIONS_FILENAME
+            )
+            append_decision(
+                decisions_path,
+                Decision(
+                    decision_id=next_decision_id(decisions_path, ref.run_id),
+                    stage=StageId.S3_DESIGN.value,
+                    actor=approver,
+                    choice="reject",
+                    rationale=comment,
+                    recorded_at=now,
+                ),
+            )
             event_log.append(
                 EventDraft(
                     run_id=ref.run_id,

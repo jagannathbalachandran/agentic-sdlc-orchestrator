@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from datetime import date
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from orchestrator.exceptions import (
     RunAlreadyTerminalError,
 )
 from orchestrator.executors.mock import MockExecutor
+from orchestrator.models.agent_io import AgentCallRequest, AgentCallResponse
 from orchestrator.models.approvals import ApprovalCheckpointKind, ApprovalDecision
 from orchestrator.models.graph import (
     CommitStrategy,
@@ -365,7 +367,28 @@ def test_reject_design_with_feedback_reruns_s3_onward_keeping_s1_s2(
     S1/S2; a later drive() re-runs S3, which hits its own Design checkpoint
     again (C11-AC3: the re-plan goes through the same approval, not around
     it); approving that re-runs S4 onward for real."""
-    executor = MockExecutor(FIXTURES_ROOT)
+    fixtures_root = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES_ROOT, fixtures_root)
+    # The re-run must produce genuinely different content — item 4/T9.7's
+    # UnchangedOnRetryGate (correctly) fails a retry that leaves the file
+    # byte-for-byte identical, which the bare generic fixture alone would be.
+    _write_fixture(
+        fixtures_root,
+        SCENARIO_WITH_NO_FIXTURES,
+        "S3-2",
+        {
+            "summary": "revised per rejection feedback",
+            "produced_ids": ["DD-1"],
+            "files_written": ["02-design.md"],
+            "files": {
+                "02-design.md": (
+                    "# Design\n\n## Technology stack\nPython 3.11+.\n\n"
+                    "## DD-1\nCites: FR-1\nRevised per rejection feedback.\n"
+                )
+            },
+        },
+    )
+    executor = MockExecutor(fixtures_root)
     request = _request(tmp_path)
 
     first = drive(request, executor=executor, max_run_duration_seconds=3600)
@@ -424,6 +447,120 @@ def test_reject_design_with_feedback_reruns_s3_onward_keeping_s1_s2(
         StageId.S8_RELEASE,
     )
     assert third.graph_state.pending_checkpoint is ApprovalCheckpointKind.RELEASE
+
+
+def test_reject_design_gives_the_reruns_a_fresh_retry_budget(
+    tmp_path: Path,
+) -> None:
+    """Item 1/T9.7: a real run found that a Design rejection's re-run
+    consumed the SAME bounded-retry budget as the original attempt, so one
+    genuine failure in the re-plan ended the whole run as failed instead of
+    retrying. `invalidate_from` now starts a fresh cycle (engine/
+    replanning.py) — S3's re-run gets its own full retry allowance: attempt
+    2 (this cycle's 1st) fails, attempt 3 (this cycle's 2nd) passes, and the
+    run reaches the Design checkpoint again rather than terminating FAILED.
+    """
+    fixtures_root = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES_ROOT, fixtures_root)
+    # Deliberately NO S3-2.json override: attempt 2 falls back to the same
+    # bare content as attempt 1 — byte-for-byte unchanged — so
+    # UnchangedOnRetryGate fails it for real, consuming 1 of this cycle's 2
+    # attempts. Attempt 3 gets genuinely different content and passes.
+    _write_fixture(
+        fixtures_root,
+        SCENARIO_WITH_NO_FIXTURES,
+        "S3-3",
+        {
+            "summary": "revised per rejection feedback",
+            "produced_ids": ["DD-1"],
+            "files_written": ["02-design.md"],
+            "files": {
+                "02-design.md": (
+                    "# Design\n\n## Technology stack\nPython 3.11+.\n\n"
+                    "## DD-1\nCites: FR-1\nRevised per rejection feedback.\n"
+                )
+            },
+        },
+    )
+    executor = MockExecutor(fixtures_root)
+    request = _request(tmp_path)
+
+    drive(request, executor=executor, max_run_duration_seconds=3600)
+    resolve_checkpoint(
+        request.ref, ApprovalDecision.REJECT, "needs more detail", "alice", 3600
+    )
+    result = drive(request, executor=executor, max_run_duration_seconds=3600)
+
+    assert result.graph_state.terminal_state is None
+    assert result.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
+    assert result.graph_state.stages[StageId.S3_DESIGN].status is StageStatus.PASSED
+    assert result.graph_state.stages[StageId.S3_DESIGN].attempts == 3
+
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    s3_finished = [
+        e for e in events if e["event_type"] == "stage_finished" and e["stage"] == "S3"
+    ]
+    statuses = []
+    for e in s3_finished:
+        payload = e["payload"]
+        assert isinstance(payload, dict)
+        statuses.append(payload["status"])
+    assert statuses == ["passed", "failed", "passed"]
+
+
+def test_rejection_feedback_reaches_the_s3_rerun_prompt(tmp_path: Path) -> None:
+    """Item 5/T9.7 (C11-AC1): the rejection comment must actually reach the
+    re-run, not just get recorded to approvals.jsonl. A real run found the
+    re-run got the exact same prompt as the first attempt, with no signal
+    anything needed to change — diagnosed as the direct cause of an
+    unrevised design (item 4).
+    """
+
+    class _RecordingExecutor:
+        def __init__(self, inner: MockExecutor) -> None:
+            self._inner = inner
+            self.prompts: list[str] = []
+
+        def execute(self, request: AgentCallRequest) -> AgentCallResponse:
+            if request.stage == "S3":
+                self.prompts.append(request.rendered_prompt)
+            return self._inner.execute(request)
+
+    fixtures_root = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES_ROOT, fixtures_root)
+    _write_fixture(
+        fixtures_root,
+        SCENARIO_WITH_NO_FIXTURES,
+        "S3-2",
+        {
+            "summary": "revised",
+            "produced_ids": ["DD-1"],
+            "files_written": ["02-design.md"],
+            "files": {
+                "02-design.md": (
+                    "# Design\n\n## Technology stack\nPython 3.11+.\n\n"
+                    "## DD-1\nCites: FR-1\nRevised.\n"
+                )
+            },
+        },
+    )
+    executor = _RecordingExecutor(MockExecutor(fixtures_root))
+    request = _request(tmp_path)
+
+    drive(request, executor=executor, max_run_duration_seconds=3600)
+    resolve_checkpoint(
+        request.ref,
+        ApprovalDecision.REJECT,
+        "the auth model is wrong — use JWT, not sessions",
+        "alice",
+        3600,
+    )
+    drive(request, executor=executor, max_run_duration_seconds=3600)
+
+    assert len(executor.prompts) == 2
+    assert "the auth model is wrong — use JWT, not sessions" not in executor.prompts[0]
+    assert "REJECTED" in executor.prompts[1]
+    assert "the auth model is wrong — use JWT, not sessions" in executor.prompts[1]
 
 
 def test_resolve_checkpoint_reject_final_ends_the_run_as_rejected(
@@ -761,7 +898,12 @@ def test_s1_blocking_questions_pause_for_clarification_then_answer_reruns_s1(
             "summary": "designed",
             "produced_ids": ["DD-1"],
             "files_written": ["02-design.md"],
-            "files": {"02-design.md": "# Design\n\n## DD-1\nCites: FR-1\n"},
+            "files": {
+                "02-design.md": (
+                    "# Design\n\n## Technology stack\nPython 3.11+.\n\n"
+                    "## DD-1\nCites: FR-1\n"
+                )
+            },
         },
     )
     request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")

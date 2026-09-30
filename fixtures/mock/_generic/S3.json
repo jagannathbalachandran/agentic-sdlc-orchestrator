@@ -3,6 +3,6 @@
   "produced_ids": ["DD-1"],
   "files_written": ["02-design.md"],
   "files": {
-    "02-design.md": "# Design\n\n## DD-1\nCites: FR-1\nGeneric placeholder design decision, serves FR-1.\n"
+    "02-design.md": "# Design\n\n## Technology stack\nPython 3.11+, FastAPI, httpx test client. No new dependencies.\n\n## DD-1\nCites: FR-1\nGeneric placeholder design decision, serves FR-1.\n"
   }
 }

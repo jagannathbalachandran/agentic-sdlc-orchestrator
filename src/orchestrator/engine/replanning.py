@@ -44,6 +44,16 @@ def invalidate_from(graph_state: GraphState, stage_id: StageId) -> tuple[StageId
     attempt 1's canned content again). Every stage strictly downstream of it
     has never run in this branch of the re-plan, so those reset to 0.
 
+    Also starts a fresh *retry budget* for `stage_id` (distinct from its
+    attempt number, which never resets): `retry_cycle_start_attempts`
+    records the attempt count as of right now, so `_max_attempts_for`'s
+    bounded-retry check (engine/fsm.py) can count attempts *since this
+    re-plan cycle began*, not the stage's whole-run total. Without this, a
+    human rejection (or a Clarification answer) that lands on a stage
+    already at/near its bounded-retry limit would leave little or no real
+    retry allowance for the re-plan itself — one genuine failure in the new
+    cycle could exhaust a budget mostly spent on unrelated earlier attempts.
+
     Returns the invalidated stage IDs (in `GRAPH`'s order) so the caller can
     record them on the triggering event (C11-AC2: "events record the trigger").
     """
@@ -51,6 +61,7 @@ def invalidate_from(graph_state: GraphState, stage_id: StageId) -> tuple[StageId
     triggering_attempts = graph_state.stages.get(
         stage_id, StageResult(stage_id=stage_id)
     ).attempts
+    graph_state.retry_cycle_start_attempts[stage_id] = triggering_attempts
     for candidate_id in affected:
         attempts = triggering_attempts if candidate_id == stage_id else 0
         graph_state.stages[candidate_id] = StageResult(
