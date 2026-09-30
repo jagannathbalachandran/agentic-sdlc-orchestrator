@@ -1618,3 +1618,40 @@ scenarios/<id>.toml` under `tmp_path`, never a registered project).
 **Full gate at the end of this pass:** 324 tests, 96.22% coverage; ruff,
 mypy --strict, pip-audit all clean.
 
+### Item 8 (found after this pass, from run 001's own metrics.json) — commit `1417a56`
+
+The user asked, against run 001's real (pre-fix) `metrics.json`
+(`stage_first_pass_rate: 0.5`, `retry_count: 1` — S0/S1/S3 all eventually
+passed, S2 skipped for greenfield, S1 failed once then passed automatically,
+the design was rejected once), whether the current code still: counts a
+skipped stage against `stage_first_pass_rate`; counts a design rejection in
+`retry_count`; omits a retry event for an automatic same-stage retry.
+
+- **Skipped stage counted against `stage_first_pass_rate`: real bug,
+  fixed.** `_stage_attempt_spans` (`audit/metrics.py`) set `passed = status
+  == "passed"`, so a `"skipped"` status (S2) evaluated to `False` — counted
+  as a first-attempt *failure*, not excluded. Explains run 001's 0.5 exactly:
+  of S0/S1(attempt 1)/S2/S3, only S2 was "false" for a reason unrelated to
+  passing or failing. Fixed: `passed` is now `None` for a skipped span
+  (excluded from the rate, same as an unfinished span already was).
+- **Design rejection counted in `retry_count`: not a bug.** C13 defines the
+  metric as generic "retry frequency", with no carve-out for human- vs.
+  system-triggered; `rollback_count` already counts a purely human-invoked
+  action the same way. Left as-is.
+- **Automatic same-stage retry omits a retry event: real bug, fixed.** The
+  only two places that ever emitted `EventType.RETRY` were the
+  design-rejection and Clarification-answer re-plan branches in
+  `resolve_checkpoint` — an ordinary bounded-retry re-attempt
+  (`_handle_stage_failure`, S1's own attempt-1-fails-attempt-2-passes case
+  in run 001) recorded no event at all, so `retry_count` silently
+  undercounted the far more common case (run 001's `retry_count: 1` reflects
+  *only* the design rejection; S1's own retry is invisible in it). Fixed:
+  `_handle_stage_failure` now records a RETRY event (`trigger:
+  automatic_retry`) whenever a stage is about to retry within its bounded
+  budget, for every stage the generic bounded-retry path covers (not
+  extended to `_handle_s7b_findings`'s separate findings-driven fix loop —
+  a distinct mechanism, out of scope for what was asked).
+
+**Full gate after this fix:** 325 tests, 96.23% coverage; ruff, mypy
+--strict, pip-audit all clean.
+
