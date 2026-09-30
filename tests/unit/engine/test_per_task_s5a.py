@@ -157,6 +157,23 @@ def test_each_task_call_gets_its_own_transcript_with_a_task_specific_id(
     assert second["prompt"] != first["prompt"]
 
 
+def test_each_tasks_files_land_in_the_shared_s5a_artifacts_manifest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 7: artifacts/<stage>/ must cover every task's files, not just
+    the last one written -- proves write_stage_artifacts' per-call merge
+    actually gets exercised through the real per-task loop."""
+    _drive_to_s5a(tmp_path, monkeypatch)
+    manifest = json.loads(
+        (
+            run_dir(tmp_path, "demo", "run-1") / "artifacts" / "S5a" / "manifest.json"
+        ).read_text(encoding="utf-8")
+    )
+
+    assert "src/thing_a.py" in manifest
+    assert "src/thing_b.py" in manifest
+
+
 def test_traceability_report_and_backward_trace_work_from_real_s5a_commits(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

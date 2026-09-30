@@ -11,6 +11,7 @@ here rather than duplicating this resolution.
 from __future__ import annotations
 
 import hashlib
+import json
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -41,6 +42,8 @@ TEMPLATE_PATH = Path("templates/python-service")
 SCENARIO_CONFIG_RELATIVE = ".orchestrator/scenarios/{scenario_id}.toml"
 PROJECT_CONFIG_RELATIVE = ".orchestrator/project.toml"
 RUN_RECORD_FILENAME = "run.json"
+SCENARIO_SNAPSHOT_FILENAME = "scenario.json"
+EFFECTIVE_CONFIG_FILENAME = "config.effective.json"
 SECONDS_PER_MINUTE = 60
 
 
@@ -182,8 +185,49 @@ def _run_state_for(graph_state: GraphState) -> RunState:
     return RunState.RUNNING
 
 
-def _effective_config_hash() -> str:
-    return hashlib.sha256(DEFAULTS_CONFIG_PATH.read_bytes()).hexdigest()
+def _write_json_snapshot(path: Path, document: dict[str, object]) -> str:
+    """Write `document` as pretty, key-sorted JSON and return its sha256 —
+    sorted keys and fixed indent keep the hash stable across writes of the
+    same logical content (tamper evidence, D-7). Written via `write_bytes`,
+    not `write_text`, so the hash matches the exact bytes on disk —
+    `write_text`'s universal-newlines mode silently rewrites `\n` to `\r\n`
+    on Windows, which would otherwise make the recorded hash never match
+    the file a later reader hashes back.
+    """
+    content = json.dumps(document, indent=2, sort_keys=True).encode("utf-8")
+    path.write_bytes(content)
+    return hashlib.sha256(content).hexdigest()
+
+
+def _write_effective_config(directory: Path) -> str:
+    """`config.effective.json` + its hash (D-7, §11) — Phase 1's merged
+    config is global-only (config/schema.py: "no project/scenario
+    merge-tightening logic"), so this *is* the full effective config for
+    now; hashing the copy actually written into the run's own directory
+    (not the source `config/defaults.toml`) means the hash still detects
+    tampering with the run record itself, not just with the repo config.
+    """
+    defaults = load_defaults_config(DEFAULTS_CONFIG_PATH)
+    return _write_json_snapshot(
+        directory / EFFECTIVE_CONFIG_FILENAME, defaults.model_dump(mode="json")
+    )
+
+
+def _write_scenario_snapshot(directory: Path, graph_state: GraphState) -> str:
+    """`scenario.json` + its hash (C2-AC2) — built from `graph_state`'s own
+    scenario-derived fields (set once, at the run's first `drive()` call,
+    from the target's `.orchestrator/scenarios/<id>.toml`) rather than
+    re-reading that file, since a resumed run has no live target checkout
+    to re-read it from.
+    """
+    document: dict[str, object] = {
+        "scenario_id": graph_state.scenario_id,
+        "req_id": graph_state.req_id,
+        "requirement_text": graph_state.requirement_text,
+        "base_ref": graph_state.base_ref,
+        "inject_fault": graph_state.inject_fault,
+    }
+    return _write_json_snapshot(directory / SCENARIO_SNAPSHOT_FILENAME, document)
 
 
 def record_run(
@@ -193,7 +237,8 @@ def record_run(
     operator: str,
     push_result: str | None = None,
 ) -> None:
-    """Write/update run.json (C1-AC2, §11) from `graph_state`'s current
+    """Write/update run.json plus its scenario.json/config.effective.json
+    snapshots (C1-AC2, C2-AC2, D-7, §11) from `graph_state`'s current
     values — called after every `drive()`/`resolve_checkpoint()` call that
     might have changed the run's state. Skipped (not a hard failure) when
     `req_id` isn't known yet — a run with no real scenario config behind it
@@ -201,6 +246,8 @@ def record_run(
     """
     if not graph_state.req_id:
         return
+    directory = run_dir(orch_home, project, graph_state.run_id)
+    directory.mkdir(parents=True, exist_ok=True)
     record = RunRecord(
         run_id=graph_state.run_id,
         project=project,
@@ -220,10 +267,9 @@ def record_run(
         push_result=push_result,
         orchestrator_version=orchestrator.__version__,
         executor_kind=graph_state.executor_kind,
-        effective_config_hash=_effective_config_hash(),
+        effective_config_hash=_write_effective_config(directory),
+        scenario_hash=_write_scenario_snapshot(directory, graph_state),
     )
-    directory = run_dir(orch_home, project, graph_state.run_id)
-    directory.mkdir(parents=True, exist_ok=True)
     (directory / RUN_RECORD_FILENAME).write_text(
         record.model_dump_json(indent=2), encoding="utf-8"
     )

@@ -5,6 +5,7 @@ scenario/project config reads, run.json, push-after-Release).
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
@@ -152,6 +153,63 @@ def test_record_run_writes_run_json_with_the_resolved_fields(tmp_path: Path) -> 
     assert data["operator"] == "jag"
     assert data["executor_kind"] == "real"
     assert data["target_url"] == "/some/target"
+
+
+def test_record_run_writes_a_scenario_snapshot_with_a_matching_hash(
+    tmp_path: Path,
+) -> None:
+    """C2-AC2: "the scenario snapshot + hash are stored in the record"."""
+    orch_home = tmp_path / "orch-home"
+    graph_state = GraphState(
+        run_id="demo-scenario-20260101-001",
+        scenario_id="demo-scenario",
+        req_id="REQ-1",
+        requirement_text="Shorten, redirect, 404 for unknown codes.",
+        base_ref="baseline-greenfield",
+        inject_fault=True,
+        base_commit="a" * 40,
+        executor_kind=ExecutorKind.REAL,
+    )
+
+    record_run(orch_home, "demo-project", graph_state, "jag")
+
+    run_directory = orch_home / "runs" / "demo-project" / graph_state.run_id
+    snapshot_path = run_directory / "scenario.json"
+    snapshot = json.loads(snapshot_path.read_text(encoding="utf-8"))
+    assert snapshot["scenario_id"] == "demo-scenario"
+    assert snapshot["req_id"] == "REQ-1"
+    assert snapshot["base_ref"] == "baseline-greenfield"
+    assert snapshot["inject_fault"] is True
+
+    run_record = json.loads((run_directory / "run.json").read_text(encoding="utf-8"))
+    expected_hash = hashlib.sha256(snapshot_path.read_bytes()).hexdigest()
+    assert run_record["scenario_hash"] == expected_hash
+
+
+def test_record_run_writes_effective_config_with_a_matching_hash(
+    tmp_path: Path,
+) -> None:
+    """D-7: "orchestrator version + config hash recorded"."""
+    orch_home = tmp_path / "orch-home"
+    graph_state = GraphState(
+        run_id="demo-scenario-20260101-001",
+        scenario_id="demo-scenario",
+        req_id="REQ-1",
+        base_commit="a" * 40,
+        executor_kind=ExecutorKind.REAL,
+    )
+
+    record_run(orch_home, "demo-project", graph_state, "jag")
+
+    run_directory = orch_home / "runs" / "demo-project" / graph_state.run_id
+    config_path = run_directory / "config.effective.json"
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    assert "coverage_threshold_percent" in config
+    assert "limits" in config
+
+    run_record = json.loads((run_directory / "run.json").read_text(encoding="utf-8"))
+    expected_hash = hashlib.sha256(config_path.read_bytes()).hexdigest()
+    assert run_record["effective_config_hash"] == expected_hash
 
 
 def test_record_run_skips_when_req_id_is_unknown(tmp_path: Path) -> None:

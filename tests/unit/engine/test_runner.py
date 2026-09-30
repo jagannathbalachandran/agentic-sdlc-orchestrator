@@ -228,6 +228,28 @@ def test_stage_runner_writes_a_transcript_when_transcripts_dir_is_configured(
     assert payload["response"]["outcome"] == "success"
 
 
+def test_stage_runner_writes_stage_artifacts_when_artifacts_dir_is_configured(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    artifacts_dir = tmp_path / "artifacts"
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(tmp_path / "events.jsonl"),
+        clock=_clock,
+        options=StageRunnerOptions(artifacts_dir=artifacts_dir),
+    )
+
+    runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
+
+    manifest = json.loads(
+        (artifacts_dir / "S1" / "manifest.json").read_text(encoding="utf-8")
+    )
+    assert "01-requirements.md" in manifest
+    assert (artifacts_dir / "S1" / "01-requirements.md").is_file()
+
+
 def test_stage_runner_writes_no_transcript_when_transcripts_dir_is_not_configured(
     tmp_path: Path,
 ) -> None:

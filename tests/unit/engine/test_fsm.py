@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import shutil
 from datetime import date
@@ -327,6 +328,27 @@ def test_drive_writes_an_agent_transcript_for_every_real_agent_call(
 
     # S0 is orchestrator-only (requires_agent=False) -- no call, no transcript.
     assert not (agents_dir / "S0-1.json").exists()
+
+
+def test_drive_writes_stage_artifacts_with_content_hashes(tmp_path: Path) -> None:
+    """Item 7 (§11 `artifacts/<stage>/`): every real agent-backed stage's
+    output files get a durable, content-hashed copy independent of git."""
+    drive(
+        _request(tmp_path),
+        executor=MockExecutor(FIXTURES_ROOT),
+        max_run_duration_seconds=3600,
+    )
+    artifacts_dir = run_dir(tmp_path, "demo", "run-1") / "artifacts"
+
+    s1_manifest = json.loads(
+        (artifacts_dir / "S1" / "manifest.json").read_text(encoding="utf-8")
+    )
+    workspace = workspace_dir(tmp_path, "demo", "run-1")
+    expected_hash = hashlib.sha256(
+        (workspace / "01-requirements.md").read_bytes()
+    ).hexdigest()
+    assert s1_manifest["01-requirements.md"] == expected_hash
+    assert (artifacts_dir / "S1" / "01-requirements.md").is_file()
 
 
 def test_drive_records_a_non_null_agent_call_id_on_events_for_real_agent_stages(

@@ -53,6 +53,7 @@ from orchestrator.audit.metrics import compute_metrics, metrics_to_model
 from orchestrator.audit.pr_description import generate_pr_description
 from orchestrator.audit.report import generate_report
 from orchestrator.audit.run_record import atomic_write_json, read_json
+from orchestrator.audit.stage_artifacts import write_stage_artifacts
 from orchestrator.audit.traceability import (
     CommitInfo,
     TraceabilityInputs,
@@ -143,6 +144,7 @@ DEFAULT_STAGE_BUDGET_USD = 0.5
 DEFAULT_TEMPLATE_PATH = Path("templates/python-service")
 DEFAULT_PROFILES_ROOT = Path("agents/profiles")
 TRANSCRIPTS_DIRNAME = "agents"
+ARTIFACTS_DIRNAME = "artifacts"
 VENV_CREATE_TIMEOUT_SECONDS = 120
 PIP_INSTALL_TIMEOUT_SECONDS = 600
 RUN_BRANCH_PREFIX = "run/"
@@ -475,6 +477,7 @@ class _LoopResources:
     reliability: ReliabilityLimits = DEFAULT_RELIABILITY_LIMITS
     profiles_root: Path = DEFAULT_PROFILES_ROOT
     transcripts_dir: Path | None = None
+    artifacts_dir: Path | None = None
 
 
 def _build_runner(
@@ -495,6 +498,7 @@ def _build_runner(
             options=StageRunnerOptions(
                 profiles_root=resources.profiles_root,
                 transcripts_dir=resources.transcripts_dir,
+                artifacts_dir=resources.artifacts_dir,
             ),
         )
     return StageRunner(
@@ -506,6 +510,7 @@ def _build_runner(
             commit_hook=_commit_hook_for(spec.stage_id, resources, graph_state),
             profiles_root=resources.profiles_root,
             transcripts_dir=resources.transcripts_dir,
+            artifacts_dir=resources.artifacts_dir,
         ),
     )
 
@@ -757,6 +762,16 @@ class _PerTaskS5aRunner(StageRunner):
                         prompt=_task_prompt(task),
                         response=response,
                     ),
+                )
+            if (
+                self._artifacts_dir is not None
+                and response.outcome is AgentCallOutcome.SUCCESS
+            ):
+                write_stage_artifacts(
+                    self._artifacts_dir,
+                    context.stage_id.value,
+                    request.workspace_path,
+                    response.files_written,
                 )
             if response.outcome is not AgentCallOutcome.SUCCESS:
                 self._record(
@@ -1488,6 +1503,9 @@ def drive(
             reliability=reliability,
             transcripts_dir=(
                 run_dir(ref.orch_home, ref.project, ref.run_id) / TRANSCRIPTS_DIRNAME
+            ),
+            artifacts_dir=(
+                run_dir(ref.orch_home, ref.project, ref.run_id) / ARTIFACTS_DIRNAME
             ),
         )
 

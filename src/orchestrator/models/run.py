@@ -59,3 +59,4 @@ class RunRecord(BaseModel):
     executor_kind: ExecutorKind
     model: str | None = None
     effective_config_hash: str
+    scenario_hash: str

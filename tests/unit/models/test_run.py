@@ -32,6 +32,7 @@ def _minimal_run_kwargs() -> dict[str, Any]:
         "orchestrator_version": "0.1.0",
         "executor_kind": ExecutorKind.MOCK,
         "effective_config_hash": "c" * 64,
+        "scenario_hash": "d" * 64,
     }
 
 

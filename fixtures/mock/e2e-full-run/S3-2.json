@@ -1,0 +1,8 @@
+{
+  "summary": "Revised DD-1 after Design rejection: addressed reviewer feedback.",
+  "produced_ids": ["DD-1"],
+  "files_written": ["02-design.md"],
+  "files": {
+    "02-design.md": "# Design\n\n## Technology stack\nPython 3.11+, FastAPI, httpx test client. No new dependencies.\n\n## DD-1: Revised after review\nCites: FR-1\nRevised placeholder design decision, addressing the reviewer's feedback, serves FR-1.\n"
+  }
+}

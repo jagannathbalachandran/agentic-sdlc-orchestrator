@@ -15,6 +15,7 @@ from pathlib import Path
 
 from orchestrator.audit.agent_transcripts import write_transcript
 from orchestrator.audit.event_log import EventLog
+from orchestrator.audit.stage_artifacts import write_stage_artifacts
 from orchestrator.exceptions import ConfigValidationError
 from orchestrator.executors.base import Executor
 from orchestrator.gates.base import Gate, StageContext
@@ -159,6 +160,7 @@ class StageRunnerOptions:
     commit_hook: CommitHook = no_op_commit
     profiles_root: Path | None = None
     transcripts_dir: Path | None = None
+    artifacts_dir: Path | None = None
 
 
 class StageRunner:
@@ -179,6 +181,7 @@ class StageRunner:
         self._commit_hook = resolved.commit_hook
         self._profiles_root = resolved.profiles_root
         self._transcripts_dir = resolved.transcripts_dir
+        self._artifacts_dir = resolved.artifacts_dir
 
     def run(self, request: StageRunRequest) -> StageRunResult:
         """Run entry gates, the agent call, exit gates, then the commit hook.
@@ -235,6 +238,13 @@ class StageRunner:
             if response.outcome is AgentCallOutcome.SUCCESS
             else StageStatus.FAILED
         )
+        if status is StageStatus.PASSED and self._artifacts_dir is not None:
+            write_stage_artifacts(
+                self._artifacts_dir,
+                context.stage_id.value,
+                request.workspace_path,
+                response.files_written,
+            )
         commit = (
             self._commit_hook(context, request.spec)
             if status is StageStatus.PASSED

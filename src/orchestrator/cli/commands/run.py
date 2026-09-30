@@ -13,6 +13,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from orchestrator.cli.commands._common import (
+    UnregisteredProjectError,
     build_new_run_request,
     build_reliability_limits,
     describe,
@@ -29,7 +30,7 @@ from orchestrator.engine.fsm import (
     generate_run_id,
     load_graph_state,
 )
-from orchestrator.exceptions import RunRecordError
+from orchestrator.exceptions import ConfigValidationError, RunRecordError
 from orchestrator.models.run import ExecutorKind
 
 COMMAND_NAME = "run"
@@ -53,26 +54,44 @@ def add_subparser(
     )
 
 
+def _build_new_mock_run_request(
+    args: argparse.Namespace, orch_home: Path, run_id: str
+) -> DriveRequest:
+    """`--mock` still resolves a real registered target's scenario config
+    when one exists — so `req_id`/`requirement_text`/`base_ref` (and, from
+    them, the run record's scenario snapshot, item 7/§11) get populated the
+    same as a real run, just with the mock executor underneath. Falls back
+    to a bare, nothing-resolved request only when there's no real target
+    config to resolve — C15-AC1's "tests run entirely on the mock executor"
+    also covers pure stub runs (CI/demos) that never registered a real,
+    locally-readable target at all.
+    """
+    try:
+        return build_new_run_request(
+            orch_home, args.project, run_id, args.scenario_id, ExecutorKind.MOCK
+        )
+    except (UnregisteredProjectError, ConfigValidationError):
+        return DriveRequest(
+            orch_home,
+            args.project,
+            run_id,
+            args.scenario_id,
+            executor_kind=ExecutorKind.MOCK,
+        )
+
+
 def _build_request(
     args: argparse.Namespace, orch_home: Path, run_id: str
 ) -> DriveRequest:
     """A resumed `--run-id` reuses the executor/target its run already
     started with (a `RunRecordError` here means it's actually a fresh
-    run-id, never driven before). `--mock` stays a self-contained mode that
-    needs no registered target at all — C15-AC1's "tests run entirely on the
-    mock executor" — resolving one is only for the real, default path.
+    run-id, never driven before).
     """
     try:
         graph_state = load_graph_state(RunRef(orch_home, args.project, run_id))
     except RunRecordError:
         if args.mock:
-            return DriveRequest(
-                orch_home,
-                args.project,
-                run_id,
-                args.scenario_id,
-                executor_kind=ExecutorKind.MOCK,
-            )
+            return _build_new_mock_run_request(args, orch_home, run_id)
         return build_new_run_request(
             orch_home, args.project, run_id, args.scenario_id, ExecutorKind.REAL
         )
