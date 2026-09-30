@@ -125,9 +125,11 @@ def test_read_file_at_commit_returns_content_that_existed_at_that_commit(
 ) -> None:
     repo = tmp_path / "repo"
     sha = _init_repo_with_one_commit(repo)
-    # run_git strips trailing whitespace (its established convention), so the
-    # source file's trailing newline doesn't survive the round trip.
-    assert read_file_at_commit(repo, sha, "README.md") == "# demo"
+    # Byte-for-byte, including the trailing newline (T9.7/item 4 — a bug
+    # found via UnchangedOnRetryGate: run_git's generic strip() was silently
+    # dropping it, making a real edit and no edit at all look identical
+    # whenever the "edit" only affected the file's trailing newline count).
+    assert read_file_at_commit(repo, sha, "README.md") == "# demo\n"
 
 
 def test_read_file_at_commit_returns_none_for_a_file_that_did_not_exist_there(

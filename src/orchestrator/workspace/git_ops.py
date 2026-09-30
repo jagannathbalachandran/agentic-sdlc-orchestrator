@@ -30,8 +30,7 @@ EMPTY_TREE_SHA = "4b825dc642cb6eb9a060e54bf8d69288fbee4904"
 _COMMIT_LOCK = threading.Lock()
 
 
-def run_git(cwd: Path, *args: str) -> str:
-    """Run one git command in `cwd`; returns stdout, raises GitCommandError on failure."""
+def _run_git_capture(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
     # args are fixed literals from internal callers below, never untrusted input;
     # "git" is resolved via PATH by design, same as every other git wrapper.
     result = subprocess.run(  # noqa: S603
@@ -44,7 +43,25 @@ def run_git(cwd: Path, *args: str) -> str:
     )
     if result.returncode != 0:
         raise GitCommandError(args, result.returncode, result.stderr)
-    return result.stdout.strip()
+    return result
+
+
+def run_git(cwd: Path, *args: str) -> str:
+    """Run one git command in `cwd`; returns stdout (stripped), raises
+    GitCommandError on failure. Stripping is right for every command this
+    wraps that returns a SHA/branch name/porcelain line — but wrong for one
+    whose output *is* file content (`git show <commit>:<path>`), where
+    trailing/leading whitespace is meaningful; that one case uses
+    `_run_git_content` instead (`read_file_at_commit`).
+    """
+    return _run_git_capture(cwd, *args).stdout.strip()
+
+
+def _run_git_content(cwd: Path, *args: str) -> str:
+    """Like `run_git`, but returns stdout byte-for-byte (no strip) — for
+    `git show <commit>:<path>`, where a stripped trailing newline would make
+    every one-line-longer real edit look identical to no edit at all."""
+    return _run_git_capture(cwd, *args).stdout
 
 
 def init_repo(path: Path) -> None:
@@ -158,9 +175,10 @@ def current_commit_or_empty_tree(path: Path) -> str:
 
 
 def read_file_at_commit(path: Path, commit: str, file_path: str) -> str | None:
-    """`file_path`'s content at `commit`, or None if it didn't exist there."""
+    """`file_path`'s content at `commit`, byte-for-byte (including any
+    trailing newline), or None if it didn't exist there."""
     try:
-        return run_git(path, "show", f"{commit}:{file_path}")
+        return _run_git_content(path, "show", f"{commit}:{file_path}")
     except GitCommandError:
         return None
 
