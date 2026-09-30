@@ -2,18 +2,25 @@
 Primary tools: Claude chat (design discussion and review), Claude Code (implementation)
 
 ## Summary
-
 **How the work was split**
-- **Me, in consultation with Claude chat:** requirements, architecture and
-  scope decisions, and review at every stage. Deliberately spent more time up
-  front on detailed requirements (~3h) so the build could run with bounded
-  agent autonomy and clear acceptance criteria.
+- **Me — research and framing:** researched the problem space, deep-dived
+  into the brief and brainstormed the high-level requirements, constraints,
+  governance principles and approach myself; then refined them in discussion
+  with Claude chat. Deliberately spent more time up front on detailed
+  requirements (~3h) so the build could run with bounded agent autonomy and
+  clear acceptance criteria.
+- **Claude chat:** discussion partner and second reviewer — refined my
+  requirements, architecture and scope decisions, drafted documents from my
+  direction, and reviewed at every hard stop and during the real runs.
 - **Claude Code:** analysis, architecture proposal, ADR draft, and the
-  implementation, task by task, with tests and per-task commits.
-- **Me:** approving at three hard stops, verifying locally, target-repo
-  setup (A1 kept untouched), acting as approver in the showcase runs.
+  implementation, task by task, with tests and per-task commits; diagnosis
+  and fixes after each real run; and, at my instruction, the automated
+  verification run.
+- **Me — oversight:** approving at three hard stops, verifying locally,
+  target-repo setup (A1 kept untouched), and acting as approver in the real
+  runs.
 
-**Major decisions (made in consultation with Claude chat)**
+**Major decisions (mine, refined in discussion with Claude chat)**
 - Orchestrator and target projects in separate repos; platform team owns the
   global rules, project teams only supply scenarios and config.
 - One fixed stage graph (S0–S8) with entry/exit gates, parallel S5/S7
@@ -27,9 +34,9 @@ Primary tools: Claude chat (design discussion and review), Claude Code (implemen
 - Agents write files with their own tools and return a small JSON summary;
   workspace confinement enforced by a post-stage check, since the CLI's own
   restriction proved not to be a hard boundary (spike finding).
-- Scope: a vertical slice that reaches real runs and all three scenarios,
-  rather than a mock-only build; specific items trimmed and listed as
-  limitations.
+- Scope: a vertical slice aimed at real runs rather than a mock-only build;
+  specific items trimmed and listed as limitations. In the time available,
+  the greenfield scenario was run for real; brownfield and ambiguous were not.
 
 **How oversight worked**
 Three hard stops (after the spike and ADR, after the core engine, before the
@@ -195,6 +202,8 @@ traced to capability/AC IDs with effort and scope risks for ~12h.
 - Caught a contradiction: the trimmed plan dropped schema change control, but
   the brownfield scenario needs it to trigger change-control approval for its
   migration. Now 7 of 8 policies; only dependency control descoped.
+   (Later superseded: dependency control was built during the pre-T10
+   integration audit, so all 8 policies exist.)
 - Added T12 (README, architecture overview, engineering summary), which were
   deliverables missing from the plan.
 - Fault injection fixed to one mechanism: the orchestrator writes one failing

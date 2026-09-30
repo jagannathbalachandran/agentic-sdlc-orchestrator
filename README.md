@@ -108,12 +108,14 @@ repo.
 - Git
 - [Claude Code](https://docs.claude.com) installed and logged in — **only for
   real runs**. Mock runs and all tests need no Claude and no network.
+- macOS/Linux only, optional: [`jq`](https://jqlang.github.io/jq/) for the
+  JSON inspection commands below (or use `python -m json.tool <file>`).
 
 ---
 
 ## 4. Setup
 
-### Windows (PowerShell)
+**Windows (PowerShell)**
 
 ```powershell
 git clone <this repo> agentic-sdlc-orchestrator
@@ -123,7 +125,7 @@ python -m venv .venv
 pip install -e ".[dev]"
 ```
 
-### Linux/macOS (bash)
+**macOS/Linux (bash)**
 
 ```bash
 git clone <this repo> agentic-sdlc-orchestrator
@@ -141,7 +143,7 @@ exercise — `scripts/check.py` fails at the pytest gate during test
 collection, before any test actually runs.
 
 ```bash
-python scripts/check.py
+python scripts/check.py            # same command on every platform
 ```
 
 This runs `ruff check`, `ruff format --check`, `mypy --strict`, `pytest`
@@ -149,19 +151,19 @@ This runs `ruff check`, `ruff format --check`, `mypy --strict`, `pytest`
 
 ### The CLI
 
-After installing, the CLI is available as `orchestrator`. If that command is
-not on your PATH, use `python -m orchestrator.cli.main` instead — the
-arguments are identical. Every command supports `--help`.
+After installing, the CLI is available as `orchestrator` on every platform. If
+that command is not on your PATH, use `python -m orchestrator.cli.main`
+instead — the arguments are identical. Every command supports `--help`.
 
 ---
 
 ## 5. Where things are stored
 
-The orchestrator keeps its runtime data in `ORCH_HOME`, default
-`~/.orchestrator` (Windows: `%USERPROFILE%\.orchestrator`):
+The orchestrator keeps its runtime data in `ORCH_HOME`, by default
+`~/.orchestrator` (macOS/Linux) or `%USERPROFILE%\.orchestrator` (Windows):
 
 ```
-~/.orchestrator/
+.orchestrator/
 ├── projects.json                         # registry: project name → repo location
 ├── workspaces/<project>/<run-id>/        # the run's workspace (agents write here)
 └── runs/<project>/<run-id>/              # the run record (orchestrator only)
@@ -176,8 +178,9 @@ Override with the `ORCH_HOME` environment variable or `--orch-home <path>`.
 
 ## 6. Using the orchestrator
 
-The examples use PowerShell syntax on Windows; on macOS/Linux replace
-`$env:USERPROFILE` with `~` and backticks (`` ` ``) with backslashes (`\`).
+The `orchestrator` and `git` commands are the same on every platform and are
+shown once. Where helper commands differ, each block is shown for **Windows
+(PowerShell)** and **macOS/Linux (bash)**.
 
 ### 6.1 Prepare a target repo (project team)
 
@@ -211,7 +214,7 @@ Build a minimal URL shortener with two capabilities only:
 - **Existing codebase:** set `base_ref` to a tag or commit; the workspace is a
   clone at that ref. Config is always read from the target's `main`.
 
-Commit and push the files to the target's `main`:
+Commit and push the files to the target's `main` (all platforms):
 
 ```bash
 git add .orchestrator
@@ -221,19 +224,28 @@ git push
 
 ### 6.2 Register the project (once)
 
+**Windows (PowerShell)**
+
 ```powershell
-orchestrator register <project-name> <repo-location>
-# example
 orchestrator register shortener-greenfield-by-agents C:\Users\<you>\projects\shortener-greenfield-by-agents
 ```
 
-The registry maps the project name to the repo location. Runs read scenarios
-from that repo's `main`.
+**macOS/Linux (bash)**
+
+```bash
+orchestrator register shortener-greenfield-by-agents ~/projects/shortener-greenfield-by-agents
+```
+
+General form: `orchestrator register <project-name> <repo-location>`. The
+registry maps the project name to the repo location; runs read scenarios from
+that repo's `main`.
 
 ### 6.3 Validate before running
 
 Checks TOML syntax, required fields, ID formats, the project config, and that
 the project is registered. Prints `OK` or the errors. No agents are called.
+
+**Windows (PowerShell)**
 
 ```powershell
 orchestrator validate <project-name> `
@@ -242,9 +254,20 @@ orchestrator validate <project-name> `
   --scenario-config <target-repo>\.orchestrator\scenarios\<scenario-id>.toml
 ```
 
+**macOS/Linux (bash)**
+
+```bash
+orchestrator validate <project-name> \
+  --defaults config/defaults.toml \
+  --project-config <target-repo>/.orchestrator/project.toml \
+  --scenario-config <target-repo>/.orchestrator/scenarios/<scenario-id>.toml
+```
+
 ### 6.4 Start a run
 
-```powershell
+All platforms:
+
+```bash
 # Real run (default): real claude -p agents
 orchestrator run <project-name> <scenario-id> --operator <your-name>
 
@@ -260,7 +283,9 @@ run greenfield-minimal-20260930-002: awaiting_approval (design)
 run-id=greenfield-minimal-20260930-002
 ```
 
-Set shortcuts for the review commands below:
+Set shortcuts to the run's workspace and record, used by the commands below:
+
+**Windows (PowerShell)**
 
 ```powershell
 $runId = "<run-id>"
@@ -268,7 +293,17 @@ $ws  = "$env:USERPROFILE\.orchestrator\workspaces\<project-name>\$runId"
 $rec = "$env:USERPROFILE\.orchestrator\runs\<project-name>\$runId"
 ```
 
+**macOS/Linux (bash)**
+
+```bash
+runId=<run-id>
+ws=~/.orchestrator/workspaces/<project-name>/$runId
+rec=~/.orchestrator/runs/<project-name>/$runId
+```
+
 ### 6.5 Follow progress
+
+**Windows (PowerShell)**
 
 ```powershell
 # Watch events live (Ctrl+C stops watching, not the run)
@@ -282,53 +317,84 @@ $g.PSObject.Properties | ForEach-Object { $_.Value } | Select-Object stage_id, s
 Get-Content "$rec\graph.json" | ConvertFrom-Json | Select-Object terminal_state, pending_checkpoint
 ```
 
+**macOS/Linux (bash)**
+
+```bash
+# Watch events live (Ctrl+C stops watching, not the run)
+tail -f -n 5 "$rec/events.jsonl"
+
+# Status of every stage
+jq -r '.stages[] | "\(.stage_id)  \(.status)  \(.attempts)"' "$rec/graph.json"
+
+# Where the run is paused
+jq '{terminal_state, pending_checkpoint}' "$rec/graph.json"
+```
+
 ### 6.6 Review and decide at each checkpoint
 
 | Checkpoint | When | Review | Then |
 |---|---|---|---|
 | Clarification | S1 raised blocking questions | Questions printed by the command | `answer` |
-| Design | After S3 (always) | `$ws\01-requirements.md`, `$ws\02-design.md` | `approve` or `reject` |
-| Change-control | S6 found a risky change (migration, new dependency, large diff) | Policy events in `$rec\events.jsonl`, the diff in `$ws` | `approve` or `reject` |
-| Release | After S8 (always) | `$ws\03-plan.md`, `$rec\report.md`, commits in `$ws` | `approve` or `reject` |
+| Design | After S3 (always) | `01-requirements.md`, `02-design.md` in the workspace | `approve` or `reject` |
+| Change-control | S6 found a risky change (migration, new dependency, large diff) | Policy events in `events.jsonl`, the diff in the workspace | `approve` or `reject` |
+| Release | After S8 (always) | `03-plan.md`, `report.md`, commits in the workspace | `approve` or `reject` |
 
-```powershell
-# Approve — continues to the next checkpoint or completion
-orchestrator approve <project-name> $runId --comment "<why>" --approver <your-name>
+Review what the agents produced:
 
-# Reject with feedback — re-plans (Design: re-runs S3 onward with your feedback)
-orchestrator reject <project-name> $runId --comment "<what to change>" --approver <your-name>
-
-# Reject and end the run
-orchestrator reject <project-name> $runId --comment "<why>" --approver <your-name> --final
-
-# Answer clarification questions — S1 re-runs with your answers
-orchestrator answer <project-name> $runId --comment "<answers>" --approver <your-name>
-```
-
-Useful review commands:
+**Windows (PowerShell)**
 
 ```powershell
 Get-Content -Encoding UTF8 "$ws\01-requirements.md"
 Get-Content -Encoding UTF8 "$ws\02-design.md"
 Get-Content -Encoding UTF8 "$ws\03-plan.md"
 Get-Content -Encoding UTF8 "$rec\report.md"
-cd $ws; git log --format="%h %s%n%(trailers)" -20; cd -
+git -C $ws log --format="%h %s%n%(trailers)" -20
+```
+
+**macOS/Linux (bash)**
+
+```bash
+cat "$ws/01-requirements.md"
+cat "$ws/02-design.md"
+cat "$ws/03-plan.md"
+cat "$rec/report.md"
+git -C "$ws" log --format="%h %s%n%(trailers)" -20
+```
+
+Then decide (all platforms):
+
+```bash
+# Approve — continues to the next checkpoint or completion
+orchestrator approve <project-name> <run-id> --comment "<why>" --approver <your-name>
+
+# Reject with feedback — re-plans (Design: re-runs S3 onward with your feedback)
+orchestrator reject <project-name> <run-id> --comment "<what to change>" --approver <your-name>
+
+# Reject and end the run
+orchestrator reject <project-name> <run-id> --comment "<why>" --approver <your-name> --final
+
+# Answer clarification questions — S1 re-runs with your answers
+orchestrator answer <project-name> <run-id> --comment "<answers>" --approver <your-name>
 ```
 
 ### 6.7 Stop or roll back
 
-```powershell
+All platforms:
+
+```bash
 # Stop a run safely (no partial commit)
-orchestrator stop <project-name> $runId --reason "<why>"
+orchestrator stop <project-name> <run-id> --reason "<why>"
 
 # Reset the workspace to the last checkpoint commit (discards later commits)
-orchestrator rollback <project-name> $runId
+orchestrator rollback <project-name> <run-id>
 ```
 
 ### 6.8 List and inspect runs
 
 There is no dedicated `runs list`/`runs show` command — inspect the run
-record directly under `ORCH_HOME` (§5):
+record directly under `ORCH_HOME` (§5).
+
+**Windows (PowerShell)**
 
 ```powershell
 # List every run recorded for a project
@@ -338,33 +404,46 @@ Get-ChildItem "$env:USERPROFILE\.orchestrator\runs\<project-name>" -Directory
 Get-Content "$rec\run.json" | ConvertFrom-Json
 ```
 
+**macOS/Linux (bash)**
+
+```bash
+# List every run recorded for a project
+ls ~/.orchestrator/runs/<project-name>
+
+# Inspect one run
+jq . "$rec/run.json"
+```
+
 ### 6.9 After a run completes
 
 On Release approval the orchestrator pushes `run/<run-id>` to the target
 repo's `origin`. For targets registered by **local path**, that is the local
-clone — push it to GitHub yourself:
+clone — push it to GitHub yourself (all platforms):
 
-```powershell
+```bash
 cd <target-repo>
 git push origin run/<run-id>
 ```
 
-Then **raise a PR** into `main` using the generated description at
-`$rec\pr-description.md`. The approver reviews and merges; the target's CI
-re-runs the gates on the merge result. The orchestrator never merges.
+Then **raise a PR** into `main` using the generated `pr-description.md` in the
+run record. The approver reviews and merges; the target's CI re-runs the gates
+on the merge result. The orchestrator never merges.
 
 ### 6.10 View a run's metrics and report
 
 Every run gets its own metrics. `metrics.json` is computed **from the run's
 events only** and written to the run record whenever the run reaches a final
 state — completed, failed, stopped or rejected — so failed runs have metrics
-too.
+too. `report.md` (with a metrics table) is written at S8, before Release
+approval.
+
+**Windows (PowerShell)**
 
 ```powershell
 # All metrics for one run
 Get-Content "$rec\metrics.json" | ConvertFrom-Json
 
-# Human-readable summary incl. a metrics table (written at S8, before Release approval)
+# Human-readable report
 Get-Content -Encoding UTF8 "$rec\report.md"
 
 # Compare runs of a project side by side
@@ -373,6 +452,21 @@ Get-ChildItem "$env:USERPROFILE\.orchestrator\runs\<project-name>" -Directory | 
   [pscustomobject]@{ run = $_.Name; success = $m.run_success; retries = $m.retry_count;
                      e2e_s = $m.end_to_end_latency_seconds; human_wait_s = $m.human_wait_seconds }
 } | Format-Table
+```
+
+**macOS/Linux (bash)**
+
+```bash
+# All metrics for one run
+jq . "$rec/metrics.json"
+
+# Human-readable report
+cat "$rec/report.md"
+
+# Compare runs of a project side by side
+for d in ~/.orchestrator/runs/<project-name>/*/; do
+  echo "$(basename "$d"): $(jq -c '{run_success, retry_count, end_to_end_latency_seconds, human_wait_seconds}' "$d/metrics.json" 2>/dev/null)"
+done
 ```
 
 | Metric | Meaning |
@@ -387,8 +481,8 @@ Get-ChildItem "$env:USERPROFILE\.orchestrator\runs\<project-name>" -Directory | 
 | `stage_latency_seconds`, `agent_call_latency_seconds` | Time per stage (all attempts) and per agent call |
 
 Metrics are **per run**. There is no built-in aggregation across runs (for
-example a project-wide success rate over time); the comparison snippet above
-is a manual way to do it.
+example a project-wide success rate over time); the comparison commands above
+are a manual way to do it.
 
 ---
 
@@ -415,7 +509,8 @@ implementation task, each with git trailers (`Run`, `Stage`, `Task`, `FR`,
 `02-design.md`, `03-plan.md` and the generated `traceability.md`
 (requirement → FR → AC → design → task → commit → test).
 
-Trace any line of code back to its requirement:
+Trace any line of code back to its requirement (all platforms, run inside the
+workspace):
 
 ```bash
 git blame <file>                                   # find the commit
