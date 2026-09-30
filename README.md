@@ -158,7 +158,7 @@ A target repo needs a `.orchestrator/` folder on its `main` branch.
 **Project config** — `.orchestrator/project.toml`:
 
 ```toml
-project_name = "shortener-greenfield-by-agents"   # must match the repo / registered name
+project_name = "shortener-greenfield-by-agents"   # descriptive only; not matched against anything
 approved_dependencies = []                        # new deps outside this list need change-control approval
 ```
 
@@ -292,15 +292,21 @@ cd $ws; git log --format="%h %s%n%(trailers)" -20; cd -
 # Stop a run safely (no partial commit)
 orchestrator stop <project-name> $runId --reason "<why>"
 
-# Reset the workspace to the last checkpoint commit
-orchestrator rollback --help        # see arguments
+# Reset the workspace to the last checkpoint commit (discards later commits)
+orchestrator rollback <project-name> $runId
 ```
 
 ### 6.8 List and inspect runs
 
+There is no dedicated `runs list`/`runs show` command — inspect the run
+record directly under `ORCH_HOME` (§5):
+
 ```powershell
-orchestrator runs list <project-name>
-orchestrator runs show --help       # see arguments
+# List every run recorded for a project
+Get-ChildItem "$env:USERPROFILE\.orchestrator\runs\<project-name>" -Directory
+
+# Inspect one run
+Get-Content "$rec\run.json" | ConvertFrom-Json
 ```
 
 ### 6.9 After a run completes
@@ -363,11 +369,14 @@ is a manual way to do it.
 
 | File | Contents |
 |---|---|
-| `run.json` | IDs, operator, times, outcome, base commit, run branch, orchestrator version, effective-config hash |
+| `run.json` | IDs, operator, times, outcome, base commit, run branch, orchestrator version, effective-config hash, scenario hash |
+| `scenario.json` | Snapshot of the scenario the run started from (hashed into `run.json`) |
+| `config.effective.json` | The merged configuration used (hashed into `run.json`) |
 | `graph.json` | Per-stage status, attempts, commits |
+| `artifacts/<stage>/` | Content-hashed copy of each stage's own output files |
 | `events.jsonl` | Hash-chained audit log: every transition, gate, policy result, approval, retry, stop |
 | `approvals.jsonl`, `decisions.jsonl` | Approval records and decision lineage |
-| `agents/` | Prompt and response for every agent call |
+| `agents/` | Role, profile version, prompt and response for every agent call |
 | `metrics.json` | Success, first-pass rate, retries, rollbacks, MTTR, latency with/without human wait |
 | `report.md`, `pr-description.md` | Human-readable summary; ready-to-paste PR description |
 
