@@ -1518,3 +1518,103 @@ content (not just under the automated E2E test).
 **Full gate at the end of this pass:** 272 tests, 95.84% coverage; ruff,
 mypy --strict, pip-audit all clean.
 
+## T9.7 — Findings from the first real greenfield run (7 items, 8 commits)
+
+The first real showcase run (`greenfield-minimal-20260930-001`, driven by the
+user through the CLI per T9.5) failed after the user rejected the design at
+the Design checkpoint. User-directed pass, from the run record's own findings:
+fix all seven, add tests, keep the full gate green, verify only against
+throwaway local repos (never the two registered target repos), and report
+back the root cause of item 4 rather than starting another run.
+
+**What eight commits changed, in order:**
+1. `65dd501` — `workspace/git_ops.py:read_file_at_commit` was silently
+   stripping a file's trailing newline (it shared `run_git`'s blanket
+   `.strip()`, correct for SHA/porcelain output but wrong for file content) —
+   found while building item 4's gate, since it made a byte-identical file
+   compare as "changed" in one direction and could mask a real change in the
+   other.
+2. `c75e162` — `gates/unchanged_on_retry_gate.py`: new `UnchangedOnRetryGate`,
+   S3's exit gate — fails a retry attempt whose `02-design.md` is still
+   byte-for-byte what HEAD already had, with a clear reason.
+3. `bbf4ff3` — `gates/technology_stack_gate.py`: new `TechnologyStackGate`
+   (item 6c) requiring a `## Technology stack` section naming a language
+   consistent with the target; two new rules on `agents/profiles/
+   architect.toml` (item 6a: mandate the section; also mandate that a
+   rejection actually gets addressed, not resubmitted unchanged).
+4. `adf9550` — the core fix, item 4's real root cause (below) plus items 1/5/
+   6b: `GraphState.retry_cycle_start_attempts` (fresh bounded-retry budget
+   per re-plan cycle, item 1) and `GraphState.design_rejection_feedback`
+   (item 5 — the rejection comment now actually reaches S3's re-run prompt);
+   `resolve_checkpoint`'s REJECT+DESIGN branch now records a `Decision` too
+   (previously only Clarification answers did); S3 wired to
+   `TechnologyStackGate`/`UnchangedOnRetryGate`; `_technology_stack_
+   instruction` adds the target's real stack (from `workspace/pyproject.
+   toml`) to S3's prompt (item 6b).
+5. `6ce0676` — `gates/traceability_gate.py`: FR/DD heading regexes now accept
+   a title after the ID (`## DD-1: <title>`, the real agent-produced format —
+   only a bare `## DD-1` matched before, so every citation gate passed
+   vacuously, "0 DD(s) cite an FR", on the real failed run's own files, item
+   2); `DesignCitationGate` now fails on zero DD sections found, and on any
+   FR not covered by ≥1 DD (S3's own documented exit condition).
+6. `85ec02f` — `engine/runner.py`: a gate failure now still records
+   `stage_finished` (previously only `gate_result`, so a gate-failed stage
+   was invisible in `stage_finished` terms); every `stage_finished` payload
+   now carries `outcome`/`error` regardless of cause.
+7. `ce0e18e` — item 3: new `AgentCallTranscript` model + `audit/
+   agent_transcripts.py`; every real agent call (`StageRunner` and the
+   per-task S5a runner, both via a new `StageRunnerOptions` bundle keeping
+   their constructors under the 5-arg limit) writes `agents/<agent_call_id>.
+   json` (role, profile version hash, prompt, response); every event now
+   carries that same `agent_call_id`.
+8. `91be387` — item 7: `record_run` also writes `scenario.json` (C2-AC2) and
+   `config.effective.json` (D-7), each hashed with the hash stored on
+   `run.json`; every real agent-backed stage's output files get a
+   content-hashed copy under `artifacts/<stage>/`; `orchestrator run --mock`
+   now resolves a real registered target's scenario config when one exists,
+   so `req_id`/scenario snapshot are populated the same as a real run without
+   touching the real Claude/network path; the E2E CLI test extended to drive
+   a full run (including a Design rejection + re-approval) against a
+   throwaway local target and assert every file §11 promises. Also found and
+   fixed in this commit: `_write_json_snapshot`'s `write_text()` silently
+   rewrote `\n` to `\r\n` on Windows, so a hash computed before the write
+   never matched the file a later reader hashed back — fixed by hashing the
+   exact bytes written via `write_bytes()`.
+
+### Item 4's root cause
+
+All of S3's re-run gates passed on the failed run, yet the stage still
+finished failed ~30 seconds in, and the post-rejection `02-design.md` was
+byte-for-byte the original (still TypeScript-style sketches, no tech stack).
+Tracing it: `resolve_checkpoint`'s REJECT+DESIGN branch invalidated S3
+onward and let `drive()`'s normal batch-selection re-run it, but never
+persisted the rejection comment anywhere `_rendered_prompt_for` could see —
+unlike the Clarification-answer branch, which does persist `graph_state.
+clarification_answer` for exactly this reason. So S3's second attempt
+received the *exact same prompt* as its first, with zero signal that
+anything needed to change; the agent (real or, in the showcase run, whatever
+was standing in for it) had no reason to produce different output, and
+didn't. Compounding it: item 1's bug meant the stage's bounded-retry
+threshold was computed from its *cumulative* attempt count, not attempts
+*since the last re-plan* — so a rejection landing on a stage already near its
+retry ceiling had little or no real budget left, and the one failure ended
+the run. Fixed by `design_rejection_feedback` (persisted, injected into S3's
+next prompt) plus `retry_cycle_start_attempts` (a fresh budget every re-plan
+cycle) — commit `adf9550`. `UnchangedOnRetryGate` (commit `c75e162`) is the
+independent safety net: even if a future prompt-plumbing bug reintroduces
+this failure mode, a retry that leaves the file unchanged now fails loudly,
+with a clear reason, instead of silently passing every gate and dying with
+no diagnosable cause.
+
+### Verification
+
+Per the user's explicit instruction, no verification touched either
+registered target repo (`shortener-greenfield-by-agents`,
+`url-shortener-brownfield-target`) — every test uses `tmp_path`-based
+throwaway local repos, including the new E2E CLI test's throwaway
+existing-codebase target (`.orchestrator/project.toml` + `.orchestrator/
+scenarios/<id>.toml` under `tmp_path`, never a registered project).
+
+**Full gate at the end of this pass:** 324 tests, 96.22% coverage; ruff,
+mypy --strict, pip-audit all clean.
+
