@@ -1184,3 +1184,83 @@ gained its own direct test of the any-attempt bare-name fallback. Full gate:
   real prompt-templating/profile-rendering system — none exists in
   `engine/fsm.py` yet for *any* stage, first-run or re-run alike.
 
+## T8.1 — Traceability + decision lineage
+
+**What changed:**
+- **Citation convention (new, this task's own design decision — requirements.md
+  doesn't dictate one):** a top-level `## <ID>` heading followed by a `Cites:
+  <ID>[, <ID>...]` line, before the next such heading. Used in
+  `01-requirements.md` (`## FR-n` cites `REQ-n`) and `02-design.md` (`## DD-n`
+  cites one or more `FR-n`). `03-plan.md` needed no new syntax — its existing
+  shape (`## FR-n` heading, `- T-n.n (DD-n): ...` task lines nested under it)
+  already encodes both facts C10-AC1 asks for a task to have (cites a DD,
+  sits under an FR), just via nesting + an inline parenthetical instead of a
+  `Cites:` line.
+- `gates/traceability_gate.py` (new): `RequirementsCitationGate`,
+  `DesignCitationGate`, `PlanCitationGate` — one focused, independently
+  testable gate class per file, each reading only its own stage's deliverable.
+  **Wired live** into `engine/fsm.py`'s `_gates_for` as S1/S3/S4's exit gates
+  — the first genuinely real (non-stub) gates in the codebase. Wiring them
+  meant updating `fixtures/mock/_generic/{S1,S3}.json` (added `Cites:` lines;
+  `S4.json` already matched) and one custom fixture set in
+  `tests/unit/engine/test_fsm.py`'s T7.4 test — confirmed to be the *only*
+  other place with custom S1/S3 fixture content before making this live.
+- **Commit trailers (C10-AC2, G-13):** `engine/runner.py` gained
+  `CommitTrailerContext`/`commit_message_with_trailers` — a structured
+  trailer block (`Task`/`FR`/`Req` when known, `Run`/`Stage` always).
+  `stage_commit_hook` (T6.1) and `engine/fsm.py`'s `_run_fix_call` (T7.1) both
+  now build their commit messages through it — the fix-call commit carries
+  `Stage: S5a-fix` specifically (not `S5a`), matching G-13's literal
+  resolution text, so `git blame`/trailers can tell a retry fix from original
+  implementation work at a glance.
+- `audit/traceability.py` (new): `generate_traceability_report` assembles the
+  FR -> AC -> DD -> task -> commit -> test chain from plain-text deliverable
+  content + a commit list + acceptance-test-file content, rendering a markdown
+  table plus a `## Gaps` section naming anything missing a link. Defines one
+  more convention along the way: an acceptance test file is tagged with a
+  `# Traces: FR-n.ACm[, ...]` comment line (matching requirements.md S5b's
+  "each tagged with its FR-n.ACm" — no tagging mechanism existed before this).
+  `backward_trace` walks one commit's own `Task:` trailer back to its FR (via
+  `03-plan.md`'s nesting) and REQ (via `01-requirements.md`'s `Cites:` line) —
+  C10-AC5's "commit trailer -> task -> FR -> REQ" half (the `git blame ->
+  trailer` half is the caller's job, outside this module).
+- `decisions.jsonl` (also named in this task's own goal text): already built
+  in T7.4 (`audit/decisions_log.py`), ahead of this task needing it for the
+  Clarification checkpoint's answer recording — nothing further needed here.
+
+**Not done — a deliberate, documented scope boundary:** requirements.md's own
+stage table has a distinct "Join S7" row ("traceability.md generated (->
+workspace)"), but the current fixed graph (`models/graph.py`'s `StageId`) has
+no node for it at all — S8 simply depends on both S7a and S7b directly
+(T6.1's parallel-join change). Actually wiring `generate_traceability_report`
+to run automatically and write `traceability.md` to the workspace at a real
+"Join S7" point would mean adding an entirely new stage to the fixed
+nine-stage (now effectively eleven-node) graph — a graph-topology change well
+beyond this task's own scope. What's built is the generator itself, fully
+tested against constructed inputs, ready to be called from wherever that
+future integration lands.
+
+**Covered:** C10-AC1, C10-AC2, C10-AC3, C10-AC5 (AC4 — "00-source.md hash
+matches" — and AC6 — decision fields — predate/are outside this task).
+
+**Tests:** `tests/unit/gates/test_traceability_gate.py` (9 tests: each gate's
+pass + fail + missing-file cases). `tests/unit/engine/test_runner.py` gained
+4 tests for the trailer helper + `stage_commit_hook`'s real trailer output
+(via an actual git repo, checked with `git log --format="%(trailers)"`, the
+same verification convention already used for every commit this session).
+`tests/unit/audit/test_traceability.py` (7 tests): a complete synthetic chain
+reports no gaps (C10-AC3's literal DoD wording); each individual missing
+link (no AC, no DD, no task, no commit, no test) is reported by name; the
+backward-trace test walks a real commit -> task -> FR -> REQ (C10-AC5's DoD),
+plus unknown-commit and no-task-trailer edge cases. Full gate: 240 tests,
+97.17% coverage.
+
+**Deferred / assumed:**
+- Real per-task S5a commits (which would populate `Task`/`FR`/`Req` trailers
+  on ordinary S5a work, not just fix-call commits) still don't exist — S5a is
+  still one generic call per stage, not one call per plan task. This task's
+  trailer support is ready for that; it doesn't build it.
+- No CLI command calls `generate_traceability_report` or writes
+  `traceability.md` anywhere yet — consistent with the "Join S7 doesn't exist
+  as a stage" boundary above.
+

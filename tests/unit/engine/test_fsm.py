@@ -689,7 +689,9 @@ def test_s1_blocking_questions_pause_for_clarification_then_answer_reruns_s1(
             "summary": "derived FR-1 but need clarification",
             "produced_ids": ["FR-1"],
             "files_written": ["01-requirements.md"],
-            "files": {"01-requirements.md": "# FR-1\n"},
+            "files": {
+                "01-requirements.md": "# Requirements\n\n## FR-1\nCites: REQ-1\n"
+            },
             "blocking_questions": ["What does 'expire' mean?"],
         },
     )
@@ -701,7 +703,9 @@ def test_s1_blocking_questions_pause_for_clarification_then_answer_reruns_s1(
             "summary": "derived FR-1, clarified",
             "produced_ids": ["FR-1"],
             "files_written": ["01-requirements.md"],
-            "files": {"01-requirements.md": "# FR-1 (clarified)\n"},
+            "files": {
+                "01-requirements.md": "# Requirements\n\n## FR-1\nCites: REQ-1\nClarified.\n"
+            },
             "blocking_questions": [],
         },
     )
@@ -724,7 +728,7 @@ def test_s1_blocking_questions_pause_for_clarification_then_answer_reruns_s1(
             "summary": "designed",
             "produced_ids": ["DD-1"],
             "files_written": ["02-design.md"],
-            "files": {"02-design.md": "# DD-1\n"},
+            "files": {"02-design.md": "# Design\n\n## DD-1\nCites: FR-1\n"},
         },
     )
     request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")

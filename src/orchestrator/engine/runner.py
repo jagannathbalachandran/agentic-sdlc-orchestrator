@@ -39,6 +39,40 @@ def no_op_commit(_context: StageContext, _spec: StageSpec) -> str | None:
     return None
 
 
+@dataclass(frozen=True)
+class CommitTrailerContext:
+    """The known pieces of a commit trailer block (C10-AC2, G-13). `run_id`/
+    `stage_label` are always known; `task_id`/`fr_id`/`req_id` are `None` when
+    not — real per-task attribution for S5a (which would populate them for a
+    normal S5a commit) isn't built yet (still one call per whole stage, not
+    per task) — an explicit, documented limitation, not a silently missing
+    trailer.
+    """
+
+    run_id: str
+    stage_label: str
+    task_id: str | None = None
+    fr_id: str | None = None
+    req_id: str | None = None
+
+
+def commit_message_with_trailers(
+    subject: str, trailer_context: CommitTrailerContext
+) -> str:
+    """Build a commit message with a structured trailer block: Task, FR, Req,
+    Run, Stage (whichever of Task/FR/Req are known)."""
+    trailers = []
+    if trailer_context.task_id:
+        trailers.append(f"Task: {trailer_context.task_id}")
+    if trailer_context.fr_id:
+        trailers.append(f"FR: {trailer_context.fr_id}")
+    if trailer_context.req_id:
+        trailers.append(f"Req: {trailer_context.req_id}")
+    trailers.append(f"Run: {trailer_context.run_id}")
+    trailers.append(f"Stage: {trailer_context.stage_label}")
+    return subject + "\n\n" + "\n".join(trailers)
+
+
 def stage_commit_hook(context: StageContext, spec: StageSpec) -> str | None:
     """Real commit hook (T6.1): one commit per stage call, unless the stage's
     `commit_strategy` is NONE. `commit_all` serializes concurrent callers
@@ -47,7 +81,11 @@ def stage_commit_hook(context: StageContext, spec: StageSpec) -> str | None:
     """
     if spec.commit_strategy is CommitStrategy.NONE:
         return None
-    return commit_all(context.workspace_path, f"{spec.stage_id.value}: stage complete")
+    message = commit_message_with_trailers(
+        f"{spec.stage_id.value}: stage complete",
+        CommitTrailerContext(run_id=context.run_id, stage_label=spec.stage_id.value),
+    )
+    return commit_all(context.workspace_path, message)
 
 
 @dataclass(frozen=True)

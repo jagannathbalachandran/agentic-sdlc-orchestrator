@@ -11,14 +11,24 @@ import pytest
 from orchestrator.audit.event_log import EventLog
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.runner import (
+    CommitTrailerContext,
     StageGateFailure,
     StageGates,
     StageRunner,
     StageRunRequest,
+    commit_message_with_trailers,
+    stage_commit_hook,
 )
 from orchestrator.executors.mock import MockExecutor
 from orchestrator.gates.base import StageContext
-from orchestrator.models.graph import GateOutcome, StageId, StageSpec, StageStatus
+from orchestrator.models.graph import (
+    CommitStrategy,
+    GateOutcome,
+    StageId,
+    StageSpec,
+    StageStatus,
+)
+from orchestrator.workspace.git_ops import init_repo, run_git
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
 FIXTURES_ROOT = REPO_ROOT / "fixtures" / "mock"
@@ -129,3 +139,70 @@ def test_stage_runner_invokes_the_commit_hook_only_on_success(tmp_path: Path) ->
 
     assert result.commit == "deadbeef"
     assert calls == [StageId.S1_REQUIREMENTS]
+
+
+def test_commit_message_with_trailers_includes_run_and_stage_always() -> None:
+    message = commit_message_with_trailers(
+        "S1: stage complete",
+        CommitTrailerContext(run_id="demo-20260101-001", stage_label="S1"),
+    )
+    assert message == ("S1: stage complete\n\nRun: demo-20260101-001\nStage: S1")
+
+
+def test_commit_message_with_trailers_includes_task_fr_req_when_known() -> None:
+    message = commit_message_with_trailers(
+        "S5a: implement",
+        CommitTrailerContext(
+            run_id="demo-20260101-001",
+            stage_label="S5a",
+            task_id="T-1.1",
+            fr_id="FR-1",
+            req_id="REQ-1",
+        ),
+    )
+    assert message == (
+        "S5a: implement\n\nTask: T-1.1\nFR: FR-1\nReq: REQ-1\n"
+        "Run: demo-20260101-001\nStage: S5a"
+    )
+
+
+def test_stage_commit_hook_produces_a_real_commit_with_run_and_stage_trailers(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    init_repo(workspace)
+    (workspace / "01-requirements.md").write_text("# FR-1\n", encoding="utf-8")
+    context = StageContext(
+        run_id="demo-20260101-001",
+        stage_id=StageId.S1_REQUIREMENTS,
+        attempt=1,
+        workspace_path=workspace,
+    )
+    spec = StageSpec(
+        stage_id=StageId.S1_REQUIREMENTS, commit_strategy=CommitStrategy.ONE
+    )
+
+    sha = stage_commit_hook(context, spec)
+
+    assert sha is not None
+    trailers = run_git(workspace, "log", "-1", "--format=%(trailers)")
+    assert "Run: demo-20260101-001" in trailers
+    assert "Stage: S1" in trailers
+
+
+def test_stage_commit_hook_is_a_no_op_when_commit_strategy_is_none(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    init_repo(workspace)
+    context = StageContext(
+        run_id="demo-20260101-001",
+        stage_id=StageId.S2_CODEBASE_ANALYSIS,
+        attempt=1,
+        workspace_path=workspace,
+    )
+    spec = StageSpec(
+        stage_id=StageId.S2_CODEBASE_ANALYSIS, commit_strategy=CommitStrategy.NONE
+    )
+
+    assert stage_commit_hook(context, spec) is None

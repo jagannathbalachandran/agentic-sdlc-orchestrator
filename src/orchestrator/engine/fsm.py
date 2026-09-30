@@ -33,10 +33,12 @@ from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
 from orchestrator.engine.replanning import invalidate_from
 from orchestrator.engine.runner import (
+    CommitTrailerContext,
     StageGates,
     StageRunner,
     StageRunRequest,
     StageRunResult,
+    commit_message_with_trailers,
     no_op_commit,
     stage_commit_hook,
 )
@@ -50,6 +52,11 @@ from orchestrator.executors.base import Executor
 from orchestrator.gates.base import Gate
 from orchestrator.gates.existence_gate import ExistenceGate
 from orchestrator.gates.schema_gate import SchemaGate
+from orchestrator.gates.traceability_gate import (
+    DesignCitationGate,
+    PlanCitationGate,
+    RequirementsCitationGate,
+)
 from orchestrator.models.approvals import (
     ApprovalCheckpointKind,
     ApprovalDecision,
@@ -166,12 +173,27 @@ def generate_run_id(
     return f"{prefix}{next_seq:03d}"
 
 
+def _traceability_gate_for(stage_id: StageId) -> Gate | None:
+    if stage_id is StageId.S1_REQUIREMENTS:
+        return RequirementsCitationGate()
+    if stage_id is StageId.S3_DESIGN:
+        return DesignCitationGate()
+    if stage_id is StageId.S4_PLAN:
+        return PlanCitationGate()
+    return None
+
+
 def _gates_for(stage_id: StageId) -> StageGates:
-    """Every stage gets the stub SchemaGate; S2 also gets the stub ExistenceGate
-    on exit ("every referenced file/symbol exists", §7's S2 exit-gate row)."""
+    """Every stage gets the stub SchemaGate; S2 also gets the stub
+    ExistenceGate on exit ("every referenced file/symbol exists", §7's S2
+    exit-gate row); S1/S3/S4 get their real citation gate (T8.1, C10-AC1).
+    """
     exit_gates: tuple[Gate, ...] = (SchemaGate(),)
     if stage_id is StageId.S2_CODEBASE_ANALYSIS:
         exit_gates = (*exit_gates, ExistenceGate())
+    traceability_gate = _traceability_gate_for(stage_id)
+    if traceability_gate is not None:
+        exit_gates = (*exit_gates, traceability_gate)
     return StageGates(entry=(SchemaGate(),), exit=exit_gates)
 
 
@@ -393,16 +415,16 @@ def _fallback_to_human(
 
 
 def _run_fix_call(
-    resources: _LoopResources, graph_state: GraphState, commit_label: str, attempt: int
+    resources: _LoopResources, graph_state: GraphState, subject: str, attempt: int
 ) -> None:
     """One targeted developer fix call (G-13), scoped to whatever just failed
-    — not a full re-run of S5a's own task loop. Committed separately from
-    normal S5a work (`commit_label`, e.g. "S5a-fix: ...") so it's never
-    misread as original implementation — full structured trailers
-    (`Stage: S5a-fix` + `Task`/`FR`) are T8.1's job, this just keeps the
-    message itself distinguishable. `attempt` (the retry count that triggered
-    this fix call, offset by 1) keys its own mock fixture distinctly from
-    S5a's original implementation call, which is always attempt 1.
+    — not a full re-run of S5a's own task loop. Committed with its own
+    `Stage: S5a-fix` trailer (C10-AC2), never `S5a`, so it's never misread as
+    original implementation work; `Task`/`FR`/`Req` trailers are omitted (real
+    per-task attribution isn't built — see commit_message_with_trailers).
+    `attempt` (the retry count that triggered this fix call, offset by 1)
+    keys its own mock fixture distinctly from S5a's original implementation
+    call, which is always attempt 1.
     """
     fix_spec = StageSpec(
         stage_id=StageId.S5A_IMPLEMENT,
@@ -422,7 +444,7 @@ def _run_fix_call(
             run_id=resources.ref.run_id,
             scenario_id=graph_state.scenario_id,
             workspace_path=resources.workspace,
-            rendered_prompt=commit_label,
+            rendered_prompt=subject,
             timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
             budget_usd=DEFAULT_STAGE_BUDGET_USD,
             attempt=attempt + 1,
@@ -430,7 +452,11 @@ def _run_fix_call(
     )
     graph_state.agent_call_count += 1
     if result.status is StageStatus.PASSED:
-        commit_all(resources.workspace, commit_label)
+        message = commit_message_with_trailers(
+            subject,
+            CommitTrailerContext(run_id=resources.ref.run_id, stage_label="S5a-fix"),
+        )
+        commit_all(resources.workspace, message)
 
 
 def _invalidate(graph_state: GraphState, stage_id: StageId, attempts: int = 0) -> None:
