@@ -30,6 +30,7 @@ from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.config.schema import RetryLimits
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
+from orchestrator.engine.replanning import invalidate_from
 from orchestrator.engine.runner import (
     StageGates,
     StageRunner,
@@ -667,10 +668,11 @@ def resolve_checkpoint(
     """Record an approve/reject/answer decision and clear the pending checkpoint.
 
     Raises NoPendingApprovalError if the run isn't actually paused. `reject` with
-    ApprovalDecision.REJECT_FINAL ends the run as `rejected` (D-14); every other
-    decision just clears the checkpoint so a later drive() call continues — real
-    rejection-driven re-planning (feedback -> re-run S3+) is T7.2's job, not this
-    task's; `comment` is still faithfully recorded either way (C7-AC2/AC3).
+    ApprovalDecision.REJECT_FINAL ends the run as `rejected` (D-14); rejecting a
+    Design checkpoint (without `--final`) triggers real re-planning (C11: S3
+    onward invalidated, S1/S2 kept — engine/replanning.py); every other
+    decision just clears the checkpoint so a later drive() call continues.
+    `comment` is faithfully recorded in every case (C7-AC2/AC3).
     """
     acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
     try:
@@ -706,6 +708,27 @@ def resolve_checkpoint(
         graph_state.pending_checkpoint = None
         if decision is ApprovalDecision.REJECT_FINAL:
             graph_state.terminal_state = RunState.REJECTED
+        elif (
+            decision is ApprovalDecision.REJECT
+            and checkpoint is ApprovalCheckpointKind.DESIGN
+        ):
+            # C11: reject Design with feedback -> re-run S3 (with the
+            # feedback) then S4 onward; S1/S2 are upstream of S3, so they're
+            # left untouched. Downstream stages are marked invalidated, not
+            # re-run directly here — the existing batch-selection machinery
+            # (engine/fsm.py's drive() loop) re-selects anything not PASSED.
+            invalidated = invalidate_from(graph_state, StageId.S3_DESIGN)
+            event_log.append(
+                EventDraft(
+                    run_id=ref.run_id,
+                    event_type=EventType.RETRY,
+                    recorded_at=now,
+                    payload={
+                        "trigger": "design_rejection",
+                        "invalidated": [stage.value for stage in invalidated],
+                    },
+                )
+            )
         else:
             # Clearing the last checkpoint (Release, after S8) with nothing else
             # pending can complete the run (D-14) — drive()'s own completion

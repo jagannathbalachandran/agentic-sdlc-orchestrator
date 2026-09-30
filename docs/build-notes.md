@@ -1013,3 +1013,50 @@ tests, 96.94% coverage.
   not when to use it automatically, and discarding work automatically felt
   like the wrong default to assume without a clearer spec signal.
 
+## T7.2 — Design-rejection re-planning
+
+**What changed:** `engine/replanning.py` (new) — `invalidate_from(graph_state,
+stage_id)`: marks `stage_id` and everything transitively downstream of it (via
+`GRAPH`'s own `depends_on` edges) `StageStatus.INVALIDATED`, returning the
+affected stage IDs in graph order for the caller to record on the triggering
+event (C11-AC2). That's the entire mechanism — no bespoke "re-run these
+stages" path was needed: `engine/fsm.py`'s existing batch-selection machinery
+(`_next_ready_batch`) already re-selects any stage that isn't `PASSED`, and
+`INVALIDATED` already existed as a `StageStatus` value (built ahead of this
+task, evidently anticipating it).
+
+`engine/fsm.py`'s `resolve_checkpoint` gained a new branch: `ApprovalDecision.
+REJECT` (not `REJECT_FINAL`) on a `DESIGN` checkpoint calls `invalidate_from(
+graph_state, StageId.S3_DESIGN)` and records an `EventType.RETRY` event
+(`{"trigger": "design_rejection", "invalidated": [...]}`) instead of falling
+through to the plain "clear the checkpoint" path every other decision takes.
+S1/S2 (upstream of S3) are untouched, matching C11-AC1 literally.
+
+**Re-approval, not a shortcut around it (C11-AC3):** S3's `StageSpec.
+checkpoint_after` is still `DESIGN` regardless of whether this is an original
+run or a re-plan, so re-running S3 pauses at Design again — a re-plan goes
+through the *same* approval a first attempt would, not around it. Only after
+that second Design approval does `drive()` actually proceed into S4 onward.
+
+**Covered:** C11-AC1, C11-AC2, C11-AC3.
+
+**Tests:** `tests/unit/engine/test_fsm.py`'s
+`test_reject_design_with_feedback_reruns_s3_onward_keeping_s1_s2` drives the
+**real** 9-stage graph (not a stub — `replanning.py` imports the real `GRAPH`
+directly, matching how it's actually used in production) through the full
+sequence: reject Design with feedback -> asserts S3..S8 are `INVALIDATED` and
+S0/S1/S2 stay `PASSED` -> asserts the `retry` event's payload -> a further
+`drive()` call re-runs *only* S3 and pauses at Design again -> approving that
+re-runs S4 through S8 for real (asserted via `ran_stages`), pausing at
+Release. Full gate: 217 tests, 96.98% coverage.
+
+**Deferred / assumed:**
+- Change-control/Release rejection re-planning (G-9's broader extension of
+  this same idea) stays designed-only, exactly as the task named — this task
+  only wires Design's rejection path.
+- Mock fixtures don't model "the analyst/architect actually used the
+  feedback" — S3's re-run replays the same generic fixture (same content) —
+  proving the *mechanism* (re-run happens, gates re-evaluate, approval is
+  required again) rather than that feedback changes the output, which isn't
+  something the current fixture format can represent.
+

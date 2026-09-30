@@ -341,6 +341,70 @@ def test_resolve_checkpoint_reject_records_feedback_without_ending_the_run(
     assert approvals[0].comment == "needs more detail"
 
 
+def test_reject_design_with_feedback_reruns_s3_onward_keeping_s1_s2(
+    tmp_path: Path,
+) -> None:
+    """T7.2/C11: rejecting Design (not --final) invalidates S3 onward, keeping
+    S1/S2; a later drive() re-runs S3, which hits its own Design checkpoint
+    again (C11-AC3: the re-plan goes through the same approval, not around
+    it); approving that re-runs S4 onward for real."""
+    executor = MockExecutor(FIXTURES_ROOT)
+    request = _request(tmp_path)
+
+    first = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert first.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
+
+    rejected_state = resolve_checkpoint(
+        request.ref, ApprovalDecision.REJECT, "needs more detail", "alice", 3600
+    )
+    assert rejected_state.pending_checkpoint is None
+    assert rejected_state.terminal_state is None
+    for stage_id in (
+        StageId.S3_DESIGN,
+        StageId.S4_PLAN,
+        StageId.S5A_IMPLEMENT,
+        StageId.S5B_ACCEPTANCE_TESTS,
+        StageId.S6_VERIFY,
+        StageId.S7A_DOCS,
+        StageId.S7B_REVIEW,
+        StageId.S8_RELEASE,
+    ):
+        assert rejected_state.stages[stage_id].status is StageStatus.INVALIDATED
+    for stage_id in (
+        StageId.S0_PREPARE,
+        StageId.S1_REQUIREMENTS,
+        StageId.S2_CODEBASE_ANALYSIS,
+    ):
+        assert rejected_state.stages[stage_id].status is StageStatus.PASSED
+
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    retry_events = [e for e in events if e["event_type"] == "retry"]
+    assert len(retry_events) == 1
+    assert isinstance(retry_events[0]["payload"], dict)
+    assert retry_events[0]["payload"]["trigger"] == "design_rejection"
+    assert "S3" in retry_events[0]["payload"]["invalidated"]
+
+    second = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert second.ran_stages == (StageId.S3_DESIGN,)
+    assert second.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
+    assert second.graph_state.stages[StageId.S3_DESIGN].attempts == 1
+
+    resolve_checkpoint(
+        request.ref, ApprovalDecision.APPROVE, "looks good now", "alice", 3600
+    )
+    third = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert third.ran_stages == (
+        StageId.S4_PLAN,
+        StageId.S5A_IMPLEMENT,
+        StageId.S5B_ACCEPTANCE_TESTS,
+        StageId.S6_VERIFY,
+        StageId.S7A_DOCS,
+        StageId.S7B_REVIEW,
+        StageId.S8_RELEASE,
+    )
+    assert third.graph_state.pending_checkpoint is ApprovalCheckpointKind.RELEASE
+
+
 def test_resolve_checkpoint_reject_final_ends_the_run_as_rejected(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
