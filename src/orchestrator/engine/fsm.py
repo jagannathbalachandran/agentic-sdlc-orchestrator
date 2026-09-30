@@ -36,9 +36,11 @@ papered over.
 
 from __future__ import annotations
 
+import re
 import shutil
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -342,7 +344,7 @@ def _write_traceability(ref: RunRef, graph_state: GraphState) -> None:
     acceptance_dir = workspace / "tests" / "acceptance"
     acceptance_test_files = (
         {
-            str(path.relative_to(workspace)): path.read_text(encoding="utf-8")
+            path.relative_to(workspace).as_posix(): path.read_text(encoding="utf-8")
             for path in sorted(acceptance_dir.rglob("*.py"))
         }
         if acceptance_dir.is_dir()
@@ -991,17 +993,23 @@ def _invalidate(graph_state: GraphState, stage_id: StageId, attempts: int = 0) -
 def _handle_stage_failure(
     resources: _LoopResources,
     graph_state: GraphState,
-    spec: StageSpec,
+    batch_result: BatchResult,
     attempts: int,
     retry_limits: RetryLimits,
 ) -> None:
     """A stage's own agent call failed (invalid output / error / timeout, or a
     gate rejected its output). S6 gets a fix call before its next attempt
-    (G-13); every other stage (including S7b failing outright, as opposed to
-    passing with findings — handled separately) just retries the same call —
-    it stays FAILED here and `_next_ready_batch` naturally re-selects it next
-    iteration, since a FAILED stage is never treated as already-passed.
+    (G-13), given the real gate failure output (`batch_result.result.
+    response.summary` — a gate-raised `StageGateFailure`'s own `str()`,
+    which for the real command gate is `scripts/check.py`'s own exit code +
+    output tail) so a real developer agent has something concrete to act
+    on, not just a generic "fix it" instruction; every other stage
+    (including S7b failing outright, as opposed to passing with findings —
+    handled separately) just retries the same call — it stays FAILED here
+    and `_next_ready_batch` naturally re-selects it next iteration, since a
+    FAILED stage is never treated as already-passed.
     """
+    spec = batch_result.spec
     max_attempts = _max_attempts_for(spec.stage_id, retry_limits)
     if attempts >= max_attempts:
         _fallback_to_human(
@@ -1013,9 +1021,11 @@ def _handle_stage_failure(
         )
         return
     if spec.stage_id is StageId.S6_VERIFY:
-        _run_fix_call(
-            resources, graph_state, "S5a-fix: address S6 verification failure", attempts
+        subject = (
+            "S5a-fix: address S6 verification failure\n\n"
+            f"{batch_result.result.response.summary}"
         )
+        _run_fix_call(resources, graph_state, subject, attempts)
 
 
 def _handle_s7b_findings(
@@ -1047,38 +1057,99 @@ def _handle_s7b_findings(
     _invalidate(graph_state, StageId.S7B_REVIEW, attempts=attempts)
 
 
-INJECTED_FAULT_TEST_PATH = "tests/acceptance/test_injected_fault.py"
-INJECTED_FAULT_TEST_CONTENT = (
-    '"""Deliberately failing test, written by the orchestrator itself (G-16) to\n'
-    "demonstrate the S6->S5a retry loop on demand, not organically discovered.\n"
-    '"""\n\n'
-    "from __future__ import annotations\n\n\n"
-    "def test_injected_fault() -> None:\n"
-    '    raise AssertionError("G-16: deliberately injected fault")\n'
+def _flip_return_true(match: re.Match[str]) -> str:
+    return "return False"
+
+
+def _flip_return_false(match: re.Match[str]) -> str:
+    return "return True"
+
+
+def _flip_equality(match: re.Match[str]) -> str:
+    return "!="
+
+
+# Small, deliberately conservative set of mutations (G-16) — each one is a
+# real behavior change an existing unit/acceptance test plausibly already
+# covers, not a syntax break or an unconditional failure. First match wins;
+# `_find_fault_mutation` scans every src/ file (sorted, for determinism).
+FAULT_MUTATION_PATTERNS: tuple[
+    tuple[re.Pattern[str], Callable[[re.Match[str]], str]], ...
+] = (
+    (re.compile(r"\breturn True\b"), _flip_return_true),
+    (re.compile(r"\breturn False\b"), _flip_return_false),
+    (re.compile(r"(?<![=!<>])==(?!=)"), _flip_equality),
 )
 
 
-def _inject_fault(
-    resources: _LoopResources, graph_state: GraphState, attempt: int
-) -> None:
-    """G-16: write one failing acceptance test, attributed to the orchestrator
-    itself (not an agent) — deterministically forces exactly one S6 failure so
-    the S6->S5a retry loop (G-13) is reliably demonstrable, rather than
-    depending on a real agent call happening to fail on its own. `injected`
-    (a first-class `EventDraft` field, not buried in payload) keeps this event
-    trivially distinguishable from an organic failure in `events.jsonl`.
+@dataclass(frozen=True)
+class _FaultMutation:
+    """One found-and-applied small defect: enough to write it, commit it,
+    and record exactly what changed (G-16's own "record exactly what was
+    changed" requirement)."""
+
+    path: Path
+    mutated_content: str
+    description: str
+
+
+def _find_fault_mutation(workspace: Path) -> _FaultMutation | None:
+    src_dir = workspace / "src"
+    if not src_dir.is_dir():
+        return None
+    for path in sorted(src_dir.rglob("*.py")):
+        content = path.read_text(encoding="utf-8")
+        for pattern, replace in FAULT_MUTATION_PATTERNS:
+            match = pattern.search(content)
+            if match is None:
+                continue
+            replacement = replace(match)
+            mutated = content[: match.start()] + replacement + content[match.end() :]
+            description = f"{match.group(0)!r} -> {replacement!r}"
+            return _FaultMutation(
+                path=path, mutated_content=mutated, description=description
+            )
+    return None
+
+
+def _inject_fault(resources: _LoopResources, graph_state: GraphState) -> None:
+    """G-16: right after S5a passes, mutate one small, real behavior in a
+    file S5a itself wrote under src/ — a change the run's own existing
+    unit/acceptance tests genuinely catch, rather than an unconditional
+    failure nothing could ever fix (the previous design: a standalone
+    `tests/acceptance/` file that always raised, which the developer fix
+    call couldn't even write to — test_engineer's path, not developer's —
+    so the retry could never actually pass). S6's very next attempt then
+    runs completely normally; its real command gate (gates/command_gate.py)
+    fails attempt 1 for real, and the fix call gets that real failure output
+    to work from (`_handle_stage_failure`).
+
+    `injected` (a first-class `EventDraft` field, not buried in payload)
+    keeps this event trivially distinguishable from an organic failure in
+    `events.jsonl`. `graph_state.fault_injected` is still set even when no
+    mutatable pattern is found (nothing to retry for — G-16 stays a no-op
+    for that run rather than silently retrying forever).
     """
-    test_path = resources.workspace / INJECTED_FAULT_TEST_PATH
-    test_path.parent.mkdir(parents=True, exist_ok=True)
-    test_path.write_text(INJECTED_FAULT_TEST_CONTENT, encoding="utf-8")
+    mutation = _find_fault_mutation(resources.workspace)
+    graph_state.fault_injected = True
+    if mutation is None:
+        return
+    mutation.path.write_text(mutation.mutated_content, encoding="utf-8")
+    relative_path = mutation.path.relative_to(resources.workspace).as_posix()
+    message = commit_message_with_trailers(
+        f"G-16: injected fault ({relative_path})",
+        CommitTrailerContext(
+            run_id=resources.ref.run_id, stage_label="fault-injection"
+        ),
+    )
+    commit_paths(resources.workspace, (relative_path,), message)
     resources.event_log.append(
         EventDraft(
             run_id=resources.ref.run_id,
             event_type=EventType.FAULT_INJECTED,
             recorded_at=datetime.now(UTC),
-            stage=StageId.S6_VERIFY.value,
-            attempt=attempt,
-            payload={"file": INJECTED_FAULT_TEST_PATH},
+            stage=StageId.S5A_IMPLEMENT.value,
+            payload={"file": relative_path, "change": mutation.description},
             injected=True,
         )
     )
@@ -1111,21 +1182,18 @@ def _record_batch_result(
     )
 
     should_inject = (
-        spec.stage_id is StageId.S6_VERIFY
+        spec.stage_id is StageId.S5A_IMPLEMENT
+        and result.status is StageStatus.PASSED
         and graph_state.inject_fault
         and not graph_state.fault_injected
-        and attempts == 1
     )
     if should_inject:
-        _inject_fault(resources, graph_state, attempts)
-        # Forced to FAILED directly, deterministically, rather than relying
-        # on the real command gate (gates/command_gate.py) to actually catch
-        # the injected failing test — a real target's own scripts/check.py
-        # *would* now fail on it too, but forcing this outcome keeps G-16's
-        # demo independent of whether a given workspace has a working venv.
-        result = StageRunResult(
-            status=StageStatus.FAILED, response=result.response, commit=None
-        )
+        # G-16: mutate a small, real behavior S5a just implemented, right
+        # after S5a itself passes — S6's own next attempt then runs
+        # completely normally and its real command gate (gates/
+        # command_gate.py) catches the mutation for real, no synthetic
+        # override needed (see _inject_fault's own docstring).
+        _inject_fault(resources, graph_state)
 
     graph_state.stages[spec.stage_id] = StageResult(
         stage_id=spec.stage_id,
@@ -1176,7 +1244,9 @@ def _record_batch_result(
             )
         )
     elif result.status is StageStatus.FAILED:
-        _handle_stage_failure(resources, graph_state, spec, attempts, retry_limits)
+        _handle_stage_failure(
+            resources, graph_state, batch_result, attempts, retry_limits
+        )
     elif spec.stage_id is StageId.S6_VERIFY:
         if not _evaluate_s6_policies(resources, graph_state, policies):
             _complete_and_record(graph_state, resources.event_log, resources.ref)
