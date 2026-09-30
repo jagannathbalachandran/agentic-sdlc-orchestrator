@@ -66,6 +66,42 @@ def test_parse_plan_tasks_preserves_each_tasks_dependency_text() -> None:
     assert "Depends on: T-1.1, T-1.3." in tasks["T-2.1"].description
 
 
+MULTILINE_PLAN_MD = """# Plan
+
+## FR-1: Shorten a long URL
+- T-1.2 (DD-3): Implement CSPRNG short-code generation —
+  `src/service/codes.py` (`generate_code`, `CODE_ALPHABET`, `CODE_LENGTH`).
+  No dependencies.
+- T-1.3 (DD-3): Implement the thread-safe in-memory `URLStore` in
+  `src/service/storage.py`. Depends on: T-1.2.
+- T-1.4 (DD-2): Implement `is_valid_url` in `src/service/urls.py`.
+  No dependencies.
+"""
+
+
+def test_parse_plan_tasks_captures_continuation_lines_not_just_the_first_line() -> None:
+    """T9.9: a real run's task entries wrapped onto continuation lines
+    (long descriptions the planner broke across multiple lines); the
+    prompt the developer actually received was truncated to the first
+    line ("Implement the thread-safe in-memory URLStore in" -- with
+    `src/service/storage.py` never reaching the agent). Each task's
+    description must now include every continuation line up to the next
+    task, not just its own first line.
+    """
+    tasks = {task.task_id: task for task in parse_plan_tasks(MULTILINE_PLAN_MD)}
+
+    assert len(tasks) == 3
+    assert "src/service/codes.py" in tasks["T-1.2"].description
+    assert "CODE_ALPHABET" in tasks["T-1.2"].description
+    assert "src/service/storage.py" in tasks["T-1.3"].description
+    assert "Depends on: T-1.2." in tasks["T-1.3"].description
+    # T-1.3's continuation lines must not leak into T-1.2's description, or
+    # vice versa -- each task's text stops at the next task line.
+    assert "src/service/storage.py" not in tasks["T-1.2"].description
+    assert "src/service/codes.py" not in tasks["T-1.3"].description
+    assert "No dependencies" in tasks["T-1.4"].description
+
+
 def test_parse_fr_to_req_also_matches_real_titled_headings() -> None:
     """The same regex drift (T9.8) affected parse_fr_to_req too -- a real
     01-requirements.md's `## FR-n: <title>` headings would have made every

@@ -80,6 +80,7 @@ from orchestrator.engine.runner import (
 )
 from orchestrator.engine.scheduler import BatchResult, run_batch
 from orchestrator.exceptions import (
+    GitCommandError,
     NoCheckpointRecordedError,
     NoPendingApprovalError,
     RunAlreadyTerminalError,
@@ -674,6 +675,27 @@ def _fr_to_req(workspace_path: Path) -> dict[str, str]:
     return parse_fr_to_req(requirements_path.read_text(encoding="utf-8"))
 
 
+def _already_committed_tasks(workspace: Path) -> dict[str, str]:
+    """task_id -> commit sha, for every commit on this branch already
+    carrying a `Task: <id>` trailer — item 5, T9.9: a real run's S5a retry
+    (attempt 2, after attempt 1's T-1.1 succeeded and committed, then T-1.2
+    failed) redid T-1.1 from scratch instead of resuming after it. The
+    per-task loop below skips any task found here rather than re-calling
+    the agent for work that already landed.
+    """
+    try:
+        log = run_git(workspace, "log", "--format=%H %(trailers:key=Task,valueonly)")
+    except GitCommandError:
+        return {}
+    result: dict[str, str] = {}
+    for line in log.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) == 2:
+            sha, task_id = parts
+            result.setdefault(task_id, sha)
+    return result
+
+
 def _task_prompt(task: PlanTask) -> str:
     return (
         f"Implement plan task {task.task_id} (cites {task.dd_id}, under "
@@ -729,9 +751,13 @@ class _PerTaskS5aRunner(StageRunner):
             return self._no_tasks_result(context)
 
         fr_to_req = _fr_to_req(request.workspace_path)
+        already_done = _already_committed_tasks(request.workspace_path)
         commits: list[str] = []
         response = NO_AGENT_RESPONSE
         for task in tasks:
+            if task.task_id in already_done:
+                commits.append(already_done[task.task_id])
+                continue
             agent_call_id = f"{context.stage_id.value}-{context.attempt}-{task.task_id}"
             response = self._executor.execute(
                 AgentCallRequest(

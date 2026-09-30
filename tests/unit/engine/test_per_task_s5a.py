@@ -219,3 +219,28 @@ def test_a_failed_task_call_stops_the_loop_without_committing_later_tasks(
     assert len(commits) == 1
     assert (workspace / "src" / "thing_a.py").is_file()
     assert not (workspace / "src" / "thing_b.py").is_file()
+
+
+def test_a_retry_resumes_from_the_failed_task_not_the_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T9.9 item 5: a real run's S5a retry (attempt 2, after attempt 1's
+    T-1.1 succeeded and committed, then T-1.2 failed) redid T-1.1 from
+    scratch -- a second real agent call and (had T-1.2 then succeeded) a
+    second, duplicate commit for work that had already landed. T-1.2's
+    fixture is missing on every attempt, so T-1.1 must commit exactly once
+    (attempt 1) and never get a second agent call on attempt 2's retry.
+    """
+    partial_fixtures_root = tmp_path / "fixtures"
+    shutil.copytree(FIXTURES_ROOT, partial_fixtures_root)
+    (partial_fixtures_root / SCENARIO_ID / "S5a-T-1.2.json").unlink()
+    (partial_fixtures_root / "_generic" / "S5a.json").unlink()
+
+    _drive_to_s5a(tmp_path, monkeypatch, partial_fixtures_root)
+
+    agents_dir = run_dir(tmp_path, "demo", "run-1") / "agents"
+    assert (agents_dir / "S5a-1-T-1.1.json").is_file()
+    assert (agents_dir / "S5a-2-T-1.2.json").is_file()
+    # The real bug: attempt 2 called the agent again for T-1.1, even though
+    # it already succeeded and committed on attempt 1.
+    assert not (agents_dir / "S5a-2-T-1.1.json").exists()

@@ -27,8 +27,8 @@ from orchestrator.gates.traceability_gate import (
     CITES_LINE,
     DD_HEADING,
     FR_HEADING,
-    TASK_LINE_CAPTURING,
     _sections,
+    _task_entries,
 )
 
 # AC headings are this module's own convention (T8.1), not shared with any
@@ -45,7 +45,7 @@ TEST_TRACES_LINE = re.compile(r"^#\s*Traces:\s*(.+)$", re.MULTILINE)
 def _task_line_findall(body: str) -> list[tuple[str, str]]:
     """`(task_id, dd_id)` pairs only -- this module never needs the task's
     description text, unlike `gates.traceability_gate.parse_plan_tasks`."""
-    return [(task_id, dd_id) for task_id, dd_id, _ in TASK_LINE_CAPTURING.findall(body)]
+    return [(task_id, dd_id) for task_id, dd_id, _ in _task_entries(body)]
 
 
 def _cited_ids(section_text: str) -> tuple[str, ...]:

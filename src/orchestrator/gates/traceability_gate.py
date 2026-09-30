@@ -29,9 +29,7 @@ FR_HEADING = re.compile(r"^##\s+(FR-\d+)\b.*$", re.MULTILINE)
 DD_HEADING = re.compile(r"^##\s+(DD-\d+)\b.*$", re.MULTILINE)
 CITES_LINE = re.compile(r"^Cites:\s*(.+)$", re.MULTILINE)
 TASK_LINE = re.compile(r"^-\s+T-\d+\.\d+\s+\(DD-\d+\):", re.MULTILINE)
-TASK_LINE_CAPTURING = re.compile(
-    r"^-\s+(T-\d+\.\d+)\s+\((DD-\d+)\):\s*(.+)$", re.MULTILINE
-)
+TASK_LINE_START = re.compile(r"^-\s+(T-\d+\.\d+)\s+\((DD-\d+)\):[ \t]*", re.MULTILINE)
 
 
 def _sections(text: str, heading: re.Pattern[str]) -> dict[str, str]:
@@ -43,6 +41,31 @@ def _sections(text: str, heading: re.Pattern[str]) -> dict[str, str]:
         ]
         for i, match in enumerate(matches)
     }
+
+
+def _task_entries(body: str) -> tuple[tuple[str, str, str], ...]:
+    """Every `- T-n.n (DD-n): <description>` task line in `body`, each
+    paired with its FULL description -- from right after the `(DD-n):`
+    prefix up to the next task line (or the end of `body`) -- not just its
+    first line. A real run's task entries wrapped across multiple lines
+    (long descriptions the planner broke onto continuation lines); the
+    previous single-line `(.+)$` capture silently truncated every one of
+    them, so the developer's prompt lost everything after the first line,
+    including which files the task actually touched (T9.9).
+    """
+    matches = list(TASK_LINE_START.finditer(body))
+    return tuple(
+        (
+            match.group(1),
+            match.group(2),
+            body[
+                match.end() : matches[i + 1].start()
+                if i + 1 < len(matches)
+                else len(body)
+            ].strip(),
+        )
+        for i, match in enumerate(matches)
+    )
 
 
 def _cited_ids(section_text: str) -> tuple[str, ...]:
@@ -161,12 +184,13 @@ def parse_plan_tasks(plan_md: str) -> tuple[tuple[str, str, str, str], ...]:
     already using this file's own (correctly `\\b.*$`-tolerant) `FR_HEADING`
     while `engine/plan_tasks.py` kept its own, separate, still-bare-heading-
     only copy — the plan passed S4's gate, then S5a's own parser found "no
-    parseable tasks" in the exact same file (T9.8).
+    parseable tasks" in the exact same file (T9.8). `description` spans
+    every continuation line up to the next task (T9.9) — see `_task_entries`.
     """
     return tuple(
-        (fr_id, task_id, dd_id, description.strip())
+        (fr_id, task_id, dd_id, description)
         for fr_id, body in _sections(plan_md, FR_HEADING).items()
-        for task_id, dd_id, description in TASK_LINE_CAPTURING.findall(body)
+        for task_id, dd_id, description in _task_entries(body)
     )
 
 

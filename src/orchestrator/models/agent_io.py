@@ -61,6 +61,11 @@ class AgentCallResponse(BaseModel):
     duration_seconds: float
     cost_usd: float | None = None
     session_id: str | None = None
+    # The agent's raw reply text (`claude -p`'s own `result` string, or the
+    # raw stdout when there's no envelope to read one from) — recorded
+    # regardless of outcome, so a transcript (T9.9) always has what the
+    # agent actually said, not just the (possibly-failed) parsed summary.
+    raw_reply: str | None = None
 
 
 class AgentCallTranscript(BaseModel):

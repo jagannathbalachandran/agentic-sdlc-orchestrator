@@ -17,6 +17,7 @@ rules = [
     "Every new or changed function must be covered by a unit test.",
     "Run tests as `python -m pytest tests/unit` — never a `.venv`-relative interpreter path and never bare `pytest`.",
     "Do not proceed to another task; you are scoped to exactly one.",
+    "Your final message must be ONLY the JSON summary object described below — no markdown fences, no prose, nothing before or after it. The orchestrator parses this message as your entire result.",
 ]
 
 enabled_tools = ["Bash"]

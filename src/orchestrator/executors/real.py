@@ -123,15 +123,62 @@ def _run_subprocess(
     return stdout, process.returncode
 
 
-def _parse_summary(envelope: dict[str, Any]) -> dict[str, Any] | None:
-    result_text = envelope.get("result")
-    if not isinstance(result_text, str):
-        return None
-    try:
-        summary = json.loads(result_text)
-    except json.JSONDecodeError:
-        return None
-    return summary if isinstance(summary, dict) else None
+RAW_REPLY_SNIPPET_CHARS = 500
+
+
+def _extract_last_json_object(text: str) -> dict[str, Any] | None:
+    """The last brace-balanced `{...}` object in `text`, parsed — tolerates
+    prose before/after the JSON summary (item 4, T9.9): the developer
+    profile's own contract says the final message is *only* the JSON, but a
+    real reply isn't guaranteed to honor that, and a strict whole-string
+    `json.loads` turned "one stray sentence" into a hard invalid_output.
+    Scans from the end so a JSON example embedded earlier in the reply
+    (e.g. quoted in an explanation) doesn't win over the real, final one.
+    """
+    depth = 0
+    end: int | None = None
+    for index in range(len(text) - 1, -1, -1):
+        char = text[index]
+        if char == "}":
+            if depth == 0:
+                end = index
+            depth += 1
+        elif char == "{":
+            depth -= 1
+            if depth == 0 and end is not None:
+                candidate = text[index : end + 1]
+                try:
+                    parsed = json.loads(candidate)
+                except json.JSONDecodeError:
+                    end = None
+                    continue
+                if isinstance(parsed, dict):
+                    return parsed
+                end = None
+    return None
+
+
+def _invalid_output_response(
+    reason: str,
+    raw_reply: str,
+    duration_seconds: float,
+    cost_usd: float | None = None,
+    session_id: str | None = None,
+) -> AgentCallResponse:
+    """A non-empty, diagnosable error (item 3, T9.9): what failed to parse,
+    plus a snippet of what the agent actually said — `summary` is what
+    `stage_finished`'s own `error` field surfaces (engine/runner.py), so an
+    empty one left a failed stage's cause undiagnosable from events alone.
+    """
+    snippet = raw_reply[:RAW_REPLY_SNIPPET_CHARS]
+    return AgentCallResponse(
+        outcome=AgentCallOutcome.INVALID_OUTPUT,
+        summary=f"{reason}; reply started: {snippet!r}",
+        duration_seconds=duration_seconds,
+        cost_usd=cost_usd,
+        session_id=session_id,
+        raw_reply=raw_reply,
+    )
 
 
 def _response_from_envelope(
@@ -139,23 +186,36 @@ def _response_from_envelope(
 ) -> AgentCallResponse:
     cost_usd = envelope.get("total_cost_usd")
     session_id = envelope.get("session_id")
+    result_text = envelope.get("result")
+    raw_reply = result_text if isinstance(result_text, str) else ""
 
     if envelope.get("is_error"):
         return AgentCallResponse(
             outcome=AgentCallOutcome.ERROR,
-            summary=str(envelope.get("result", "")),
+            summary=raw_reply or "claude -p reported is_error with no result text",
             duration_seconds=duration_seconds,
             cost_usd=cost_usd,
             session_id=session_id,
+            raw_reply=raw_reply,
         )
 
-    summary = _parse_summary(envelope)
+    if not isinstance(result_text, str):
+        return _invalid_output_response(
+            "no 'result' text in the claude -p envelope",
+            raw_reply,
+            duration_seconds,
+            cost_usd,
+            session_id,
+        )
+
+    summary = _extract_last_json_object(result_text)
     if summary is None:
-        return AgentCallResponse(
-            outcome=AgentCallOutcome.INVALID_OUTPUT,
-            duration_seconds=duration_seconds,
-            cost_usd=cost_usd,
-            session_id=session_id,
+        return _invalid_output_response(
+            "no JSON summary object found in the agent's reply",
+            raw_reply,
+            duration_seconds,
+            cost_usd,
+            session_id,
         )
 
     return AgentCallResponse(
@@ -168,6 +228,7 @@ def _response_from_envelope(
         duration_seconds=duration_seconds,
         cost_usd=cost_usd,
         session_id=session_id,
+        raw_reply=raw_reply,
     )
 
 
@@ -201,13 +262,15 @@ class RealExecutor:
         stdout, _returncode = outcome
         try:
             envelope = json.loads(stdout)
-        except json.JSONDecodeError:
-            return AgentCallResponse(
-                outcome=AgentCallOutcome.INVALID_OUTPUT, duration_seconds=duration
+        except json.JSONDecodeError as exc:
+            return _invalid_output_response(
+                f"claude -p's own stdout was not valid JSON: {exc}", stdout, duration
             )
         if not isinstance(envelope, dict):
-            return AgentCallResponse(
-                outcome=AgentCallOutcome.INVALID_OUTPUT, duration_seconds=duration
+            return _invalid_output_response(
+                "claude -p's own stdout was valid JSON but not an object",
+                stdout,
+                duration,
             )
 
         return _response_from_envelope(envelope, duration)

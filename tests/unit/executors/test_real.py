@@ -160,6 +160,15 @@ def test_execute_returns_invalid_output_when_the_summary_is_not_json(
     response = executor.execute(_request(tmp_path))
 
     assert response.outcome is AgentCallOutcome.INVALID_OUTPUT
+    # T9.9 item 3: a real run recorded outcome=invalid_output with an EMPTY
+    # error -- undiagnosable from events alone. The error must now say what
+    # failed and show what the agent actually said.
+    assert response.summary != ""
+    assert "no JSON summary object" in response.summary
+    assert "not json at all" in response.summary
+    # T9.9 item 2: the transcript must carry the agent's raw reply text, not
+    # only the (failed) parsed summary.
+    assert response.raw_reply == "not json at all"
 
 
 def test_execute_returns_invalid_output_when_the_outer_envelope_is_not_json(
@@ -174,21 +183,51 @@ def test_execute_returns_invalid_output_when_the_outer_envelope_is_not_json(
     response = executor.execute(_request(tmp_path))
 
     assert response.outcome is AgentCallOutcome.INVALID_OUTPUT
+    assert response.summary != ""
+    assert "not valid JSON" in response.summary
+    assert response.raw_reply == "not json"
+
+
+def test_execute_extracts_the_last_json_object_from_a_reply_with_surrounding_prose(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T9.9 item 4: summary parsing must tolerate prose before/after the
+    JSON summary, not require the whole reply to be exactly one JSON
+    document."""
+    reply = (
+        "I've implemented the task and run the tests, all green.\n\n"
+        'Here is my summary: {"summary": "did the thing", '
+        '"produced_ids": ["T-1.1"], "files_written": ["src/thing.py"]}'
+    )
+    envelope = json.dumps({"is_error": False, "result": reply})
+    monkeypatch.setattr(
+        "orchestrator.executors.real.subprocess.Popen",
+        lambda *args, **kwargs: _FakePopen(envelope),
+    )
+
+    executor = RealExecutor(_profiles_root(tmp_path))
+    response = executor.execute(_request(tmp_path))
+
+    assert response.outcome is AgentCallOutcome.SUCCESS
+    assert response.summary == "did the thing"
+    assert response.files_written == ("src/thing.py",)
+    assert response.raw_reply == reply
 
 
 def test_execute_parses_a_well_formed_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    result_text = json.dumps(
+        {
+            "summary": "derived FR-1",
+            "produced_ids": ["FR-1"],
+            "files_written": ["01-requirements.md"],
+        }
+    )
     envelope = json.dumps(
         {
             "is_error": False,
-            "result": json.dumps(
-                {
-                    "summary": "derived FR-1",
-                    "produced_ids": ["FR-1"],
-                    "files_written": ["01-requirements.md"],
-                }
-            ),
+            "result": result_text,
             "total_cost_usd": 0.05,
             "session_id": "abc-123",
         }
@@ -207,6 +246,7 @@ def test_execute_parses_a_well_formed_summary(
     assert response.files_written == ("01-requirements.md",)
     assert response.cost_usd == 0.05
     assert response.session_id == "abc-123"
+    assert response.raw_reply == result_text
 
 
 def test_execute_returns_error_outcome_when_the_envelope_flags_is_error(
@@ -223,3 +263,4 @@ def test_execute_returns_error_outcome_when_the_envelope_flags_is_error(
 
     assert response.outcome is AgentCallOutcome.ERROR
     assert "overloaded" in response.summary
+    assert response.raw_reply == "API error: overloaded"
