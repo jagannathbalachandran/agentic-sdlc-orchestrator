@@ -45,6 +45,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
 
+from orchestrator.audit.agent_transcripts import write_transcript
 from orchestrator.audit.approvals_log import append_approval
 from orchestrator.audit.decisions_log import append_decision, next_decision_id
 from orchestrator.audit.event_log import EventLog
@@ -69,6 +70,7 @@ from orchestrator.engine.runner import (
     CommitTrailerContext,
     StageGates,
     StageRunner,
+    StageRunnerOptions,
     StageRunRequest,
     StageRunResult,
     commit_message_with_trailers,
@@ -97,6 +99,7 @@ from orchestrator.models.agent_io import (
     AgentCallOutcome,
     AgentCallRequest,
     AgentCallResponse,
+    AgentCallTranscript,
 )
 from orchestrator.models.approvals import (
     ApprovalCheckpointKind,
@@ -138,6 +141,8 @@ SOURCE_BASELINE_FILENAME = "00-source.md"
 DEFAULT_STAGE_TIMEOUT_SECONDS = 600
 DEFAULT_STAGE_BUDGET_USD = 0.5
 DEFAULT_TEMPLATE_PATH = Path("templates/python-service")
+DEFAULT_PROFILES_ROOT = Path("agents/profiles")
+TRANSCRIPTS_DIRNAME = "agents"
 VENV_CREATE_TIMEOUT_SECONDS = 120
 PIP_INSTALL_TIMEOUT_SECONDS = 600
 RUN_BRANCH_PREFIX = "run/"
@@ -468,6 +473,8 @@ class _LoopResources:
     workspace: Path
     max_run_duration_seconds: float
     reliability: ReliabilityLimits = DEFAULT_RELIABILITY_LIMITS
+    profiles_root: Path = DEFAULT_PROFILES_ROOT
+    transcripts_dir: Path | None = None
 
 
 def _build_runner(
@@ -485,13 +492,21 @@ def _build_runner(
             event_log=resources.event_log,
             clock=lambda: datetime.now(UTC),
             run_id=resources.ref.run_id,
+            options=StageRunnerOptions(
+                profiles_root=resources.profiles_root,
+                transcripts_dir=resources.transcripts_dir,
+            ),
         )
     return StageRunner(
         executor=resources.executor,
         event_log=resources.event_log,
         clock=lambda: datetime.now(UTC),
-        gates=_gates_for(spec.stage_id),
-        commit_hook=_commit_hook_for(spec.stage_id, resources, graph_state),
+        options=StageRunnerOptions(
+            gates=_gates_for(spec.stage_id),
+            commit_hook=_commit_hook_for(spec.stage_id, resources, graph_state),
+            profiles_root=resources.profiles_root,
+            transcripts_dir=resources.transcripts_dir,
+        ),
     )
 
 
@@ -535,7 +550,7 @@ class _SkippedS2Runner(StageRunner):
         self._record(
             context,
             EventType.STAGE_FINISHED,
-            {"status": StageStatus.SKIPPED.value, "reason": S2_SKIP_REASON},
+            payload={"status": StageStatus.SKIPPED.value, "reason": S2_SKIP_REASON},
         )
         return StageRunResult(
             status=StageStatus.SKIPPED, response=NO_AGENT_RESPONSE, commit=None
@@ -683,9 +698,16 @@ class _PerTaskS5aRunner(StageRunner):
     """
 
     def __init__(
-        self, executor: Executor, event_log: EventLog, clock: Clock, run_id: str
+        self,
+        executor: Executor,
+        event_log: EventLog,
+        clock: Clock,
+        run_id: str,
+        options: StageRunnerOptions | None = None,
     ) -> None:
-        super().__init__(executor=executor, event_log=event_log, clock=clock)
+        super().__init__(
+            executor=executor, event_log=event_log, clock=clock, options=options
+        )
         self._run_id = run_id
 
     def run(self, request: StageRunRequest) -> StageRunResult:
@@ -705,6 +727,7 @@ class _PerTaskS5aRunner(StageRunner):
         commits: list[str] = []
         response = NO_AGENT_RESPONSE
         for task in tasks:
+            agent_call_id = f"{context.stage_id.value}-{context.attempt}-{task.task_id}"
             response = self._executor.execute(
                 AgentCallRequest(
                     profile_name=request.spec.owner_profile or "",
@@ -718,11 +741,28 @@ class _PerTaskS5aRunner(StageRunner):
                     budget_usd=request.budget_usd,
                 )
             )
+            if self._transcripts_dir is not None and request.spec.owner_profile:
+                write_transcript(
+                    self._transcripts_dir,
+                    AgentCallTranscript(
+                        agent_call_id=agent_call_id,
+                        run_id=context.run_id,
+                        stage=context.stage_id.value,
+                        attempt=context.attempt,
+                        task_id=task.task_id,
+                        role=request.spec.owner_profile,
+                        profile_version_hash=self._profile_version_hash(
+                            request.spec.owner_profile
+                        ),
+                        prompt=_task_prompt(task),
+                        response=response,
+                    ),
+                )
             if response.outcome is not AgentCallOutcome.SUCCESS:
                 self._record(
                     context,
                     EventType.STAGE_FINISHED,
-                    {
+                    payload={
                         "status": StageStatus.FAILED.value,
                         "outcome": response.outcome.value,
                         "error": response.summary,
@@ -751,7 +791,7 @@ class _PerTaskS5aRunner(StageRunner):
         self._record(
             context,
             EventType.STAGE_FINISHED,
-            {
+            payload={
                 "status": StageStatus.PASSED.value,
                 "outcome": response.outcome.value,
                 "error": "",
@@ -773,7 +813,7 @@ class _PerTaskS5aRunner(StageRunner):
         self._record(
             context,
             EventType.STAGE_FINISHED,
-            {
+            payload={
                 "status": StageStatus.FAILED.value,
                 "outcome": response.outcome.value,
                 "error": response.summary,
@@ -1022,8 +1062,12 @@ def _run_fix_call(
         executor=resources.executor,
         event_log=resources.event_log,
         clock=lambda: datetime.now(UTC),
-        gates=StageGates(),
-        commit_hook=no_op_commit,
+        options=StageRunnerOptions(
+            gates=StageGates(),
+            commit_hook=no_op_commit,
+            profiles_root=resources.profiles_root,
+            transcripts_dir=resources.transcripts_dir,
+        ),
     )
     result = runner.run(
         StageRunRequest(
@@ -1032,8 +1076,8 @@ def _run_fix_call(
             scenario_id=graph_state.scenario_id,
             workspace_path=resources.workspace,
             rendered_prompt=subject,
-            timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
-            budget_usd=DEFAULT_STAGE_BUDGET_USD,
+            timeout_seconds=resources.reliability.per_call_timeout_seconds,
+            budget_usd=resources.reliability.budget_usd,
             attempt=attempt + 1,
         )
     )
@@ -1442,6 +1486,9 @@ def drive(
             workspace=workspace,
             max_run_duration_seconds=max_run_duration_seconds,
             reliability=reliability,
+            transcripts_dir=(
+                run_dir(ref.orch_home, ref.project, ref.run_id) / TRANSCRIPTS_DIRNAME
+            ),
         )
 
         ran_stages: list[StageId] = []

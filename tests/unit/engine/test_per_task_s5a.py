@@ -15,6 +15,7 @@ tests/integration/test_parallel_scheduler.py).
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 
@@ -30,6 +31,7 @@ from orchestrator.engine.fsm import (
     DriveRequest,
     drive,
     resolve_checkpoint,
+    run_dir,
     workspace_dir,
 )
 from orchestrator.executors.mock import MockExecutor
@@ -134,6 +136,25 @@ def test_each_s5a_commit_carries_the_correct_trailers(
     assert "Task: T-1.2" in second_message
     assert "FR: FR-1" in second_message
     assert "Req: REQ-1" in second_message
+
+
+def test_each_task_call_gets_its_own_transcript_with_a_task_specific_id(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Item 3: the per-task runner makes N separate agent calls, one per
+    task, so each must leave its own transcript (not one shared per stage
+    attempt) -- distinguishable by `task_id` and a task-suffixed
+    `agent_call_id`."""
+    _drive_to_s5a(tmp_path, monkeypatch)
+    agents_dir = run_dir(tmp_path, "demo", "run-1") / "agents"
+
+    first = json.loads((agents_dir / "S5a-1-T-1.1.json").read_text(encoding="utf-8"))
+    assert first["task_id"] == "T-1.1"
+    assert first["role"] == "developer"
+
+    second = json.loads((agents_dir / "S5a-1-T-1.2.json").read_text(encoding="utf-8"))
+    assert second["task_id"] == "T-1.2"
+    assert second["prompt"] != first["prompt"]
 
 
 def test_traceability_report_and_backward_trace_work_from_real_s5a_commits(

@@ -43,6 +43,7 @@ from orchestrator.models.graph import (
 from orchestrator.models.run import RunState
 from orchestrator.policies.schema_change_control import SchemaChangeControlPolicy
 from orchestrator.policies.secret_scan import SecretScanPolicy
+from orchestrator.profiles.loader import load_profile
 from orchestrator.workspace.git_ops import current_commit
 
 REPO_ROOT = Path(__file__).resolve().parents[3]
@@ -289,6 +290,64 @@ def test_drive_creates_a_fresh_workspace_and_writes_stage_files(tmp_path: Path) 
     )
     workspace = workspace_dir(tmp_path, "demo", "run-1")
     assert (workspace / "00-source.md").is_file()
+
+
+def test_drive_writes_an_agent_transcript_for_every_real_agent_call(
+    tmp_path: Path,
+) -> None:
+    """Item 3 (C8-AC4, requirements.md §11 `agents/`): S1 and S3 are real
+    agent-backed stages (S0/S2 aren't — S0 is orchestrator-only, S2 is
+    skipped for a greenfield run with no base_ref) — each of their calls
+    must leave a transcript naming its role, profile version, prompt and
+    response, not just an event.
+    """
+    drive(
+        _request(tmp_path),
+        executor=MockExecutor(FIXTURES_ROOT),
+        max_run_duration_seconds=3600,
+    )
+    agents_dir = run_dir(tmp_path, "demo", "run-1") / "agents"
+
+    s1_transcript = json.loads((agents_dir / "S1-1.json").read_text(encoding="utf-8"))
+    assert s1_transcript["role"] == "analyst"
+    assert s1_transcript["stage"] == "S1"
+    assert s1_transcript["attempt"] == 1
+    assert s1_transcript["profile_version_hash"]
+    assert s1_transcript["prompt"]
+    assert s1_transcript["response"]["outcome"] == "success"
+
+    s3_transcript = json.loads((agents_dir / "S3-1.json").read_text(encoding="utf-8"))
+    assert s3_transcript["role"] == "architect"
+    assert s3_transcript["stage"] == "S3"
+
+    expected_analyst_hash = load_profile(
+        REPO_ROOT / "agents" / "profiles" / "analyst.toml"
+    ).version_hash
+    assert s1_transcript["profile_version_hash"] == expected_analyst_hash
+
+    # S0 is orchestrator-only (requires_agent=False) -- no call, no transcript.
+    assert not (agents_dir / "S0-1.json").exists()
+
+
+def test_drive_records_a_non_null_agent_call_id_on_events_for_real_agent_stages(
+    tmp_path: Path,
+) -> None:
+    """A failed real-agent-backed stage must be traceable from events alone
+    back to its transcript file -- `agent_call_id` is the join key."""
+    drive(
+        _request(tmp_path),
+        executor=MockExecutor(FIXTURES_ROOT),
+        max_run_duration_seconds=3600,
+    )
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+
+    s1_events = [event for event in events if event["stage"] == "S1"]
+    assert s1_events
+    assert all(event["agent_call_id"] == "S1-1" for event in s1_events)
+
+    s0_events = [event for event in events if event["stage"] == "S0"]
+    assert s0_events
+    assert all(event["agent_call_id"] is None for event in s0_events)
 
 
 def test_drive_pauses_at_a_checkpoint_and_a_later_call_makes_no_further_progress(

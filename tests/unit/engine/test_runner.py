@@ -15,6 +15,7 @@ from orchestrator.engine.runner import (
     StageGateFailure,
     StageGates,
     StageRunner,
+    StageRunnerOptions,
     StageRunRequest,
     commit_message_with_trailers,
     stage_commit_hook,
@@ -110,7 +111,7 @@ def test_stage_runner_raises_stage_gate_failure_and_never_calls_the_executor(
         executor=MockExecutor(FIXTURES_ROOT),
         event_log=EventLog(events_path),
         clock=_clock,
-        gates=StageGates(entry=(_AlwaysFailGate(),)),
+        options=StageRunnerOptions(gates=StageGates(entry=(_AlwaysFailGate(),))),
     )
 
     with pytest.raises(StageGateFailure):
@@ -148,7 +149,7 @@ def test_stage_runner_invokes_the_commit_hook_only_on_success(tmp_path: Path) ->
         executor=MockExecutor(FIXTURES_ROOT),
         event_log=EventLog(tmp_path / "events.jsonl"),
         clock=_clock,
-        commit_hook=_commit_hook,
+        options=StageRunnerOptions(commit_hook=_commit_hook),
     )
     result = runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
 
@@ -203,6 +204,132 @@ def test_stage_commit_hook_produces_a_real_commit_with_run_and_stage_trailers(
     trailers = run_git(workspace, "log", "-1", "--format=%(trailers)")
     assert "Run: demo-20260101-001" in trailers
     assert "Stage: S1" in trailers
+
+
+def test_stage_runner_writes_a_transcript_when_transcripts_dir_is_configured(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    transcripts_dir = tmp_path / "agents"
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(tmp_path / "events.jsonl"),
+        clock=_clock,
+        options=StageRunnerOptions(transcripts_dir=transcripts_dir),
+    )
+
+    runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
+
+    payload = json.loads((transcripts_dir / "S1-1.json").read_text(encoding="utf-8"))
+    assert payload["stage"] == "S1"
+    assert payload["attempt"] == 1
+    assert payload["prompt"] == "derive FRs"
+    assert payload["response"]["outcome"] == "success"
+
+
+def test_stage_runner_writes_no_transcript_when_transcripts_dir_is_not_configured(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(tmp_path / "events.jsonl"),
+        clock=_clock,
+    )
+
+    runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
+
+    assert not (tmp_path / "agents").exists()
+
+
+def test_stage_runner_resolves_profile_version_hash_from_profiles_root(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    profiles_root = tmp_path / "profiles"
+    profiles_root.mkdir()
+    (profiles_root / "analyst.toml").write_text(
+        'name = "analyst"\n'
+        'persona = "a terse analyst"\n'
+        'responsibilities = "derive FRs"\n'
+        'output_contract = "01-requirements.md"\n',
+        encoding="utf-8",
+    )
+    transcripts_dir = tmp_path / "agents"
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(tmp_path / "events.jsonl"),
+        clock=_clock,
+        options=StageRunnerOptions(
+            profiles_root=profiles_root, transcripts_dir=transcripts_dir
+        ),
+    )
+
+    runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
+
+    payload = json.loads((transcripts_dir / "S1-1.json").read_text(encoding="utf-8"))
+    assert payload["profile_version_hash"]
+
+
+def test_stage_runner_leaves_profile_version_hash_none_when_the_profile_is_missing(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    transcripts_dir = tmp_path / "agents"
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(tmp_path / "events.jsonl"),
+        clock=_clock,
+        options=StageRunnerOptions(
+            profiles_root=tmp_path / "no-such-profiles-dir",
+            transcripts_dir=transcripts_dir,
+        ),
+    )
+
+    runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
+
+    payload = json.loads((transcripts_dir / "S1-1.json").read_text(encoding="utf-8"))
+    assert payload["profile_version_hash"] is None
+
+
+def test_stage_runner_records_a_non_null_agent_call_id_on_events(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    events_path = tmp_path / "events.jsonl"
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(events_path),
+        clock=_clock,
+    )
+
+    runner.run(_request(StageId.S1_REQUIREMENTS, workspace, "derive FRs"))
+
+    events = _read_events(events_path)
+    assert all(event["agent_call_id"] == "S1-1" for event in events)
+
+
+def test_stage_runner_leaves_agent_call_id_none_for_a_stage_that_requires_no_agent(
+    tmp_path: Path,
+) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    events_path = tmp_path / "events.jsonl"
+    runner = StageRunner(
+        executor=MockExecutor(FIXTURES_ROOT),
+        event_log=EventLog(events_path),
+        clock=_clock,
+    )
+
+    runner.run(_request(StageId.S0_PREPARE, workspace, "prepare the workspace"))
+
+    events = _read_events(events_path)
+    assert all(event["agent_call_id"] is None for event in events)
 
 
 def test_stage_commit_hook_is_a_no_op_when_commit_strategy_is_none(

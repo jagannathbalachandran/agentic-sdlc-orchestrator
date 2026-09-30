@@ -13,13 +13,16 @@ from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 
+from orchestrator.audit.agent_transcripts import write_transcript
 from orchestrator.audit.event_log import EventLog
+from orchestrator.exceptions import ConfigValidationError
 from orchestrator.executors.base import Executor
 from orchestrator.gates.base import Gate, StageContext
 from orchestrator.models.agent_io import (
     AgentCallOutcome,
     AgentCallRequest,
     AgentCallResponse,
+    AgentCallTranscript,
 )
 from orchestrator.models.events import EventDraft, EventType
 from orchestrator.models.graph import (
@@ -28,6 +31,7 @@ from orchestrator.models.graph import (
     StageSpec,
     StageStatus,
 )
+from orchestrator.profiles.loader import load_profile
 from orchestrator.workspace.git_ops import commit_all
 
 Clock = Callable[[], datetime]
@@ -141,6 +145,22 @@ class StageGateFailure(Exception):
         self.outcome = outcome
 
 
+@dataclass(frozen=True)
+class StageRunnerOptions:
+    """StageRunner's secondary construction params, bundled to stay under
+    the project's max-args limit. `profiles_root`/`transcripts_dir` are both
+    optional (default `None`, meaning "skip this" — most direct unit-test
+    construction doesn't care) — production usage (`engine/fsm.py:
+    _build_runner`) always supplies real paths, so every real agent call
+    gets a transcript (item 3, C8-AC4).
+    """
+
+    gates: StageGates | None = None
+    commit_hook: CommitHook = no_op_commit
+    profiles_root: Path | None = None
+    transcripts_dir: Path | None = None
+
+
 class StageRunner:
     """Drives one stage through its full boundary lifecycle."""
 
@@ -149,14 +169,16 @@ class StageRunner:
         executor: Executor,
         event_log: EventLog,
         clock: Clock,
-        gates: StageGates | None = None,
-        commit_hook: CommitHook = no_op_commit,
+        options: StageRunnerOptions | None = None,
     ) -> None:
+        resolved = options if options is not None else StageRunnerOptions()
         self._executor = executor
         self._event_log = event_log
         self._clock = clock
-        self._gates = gates if gates is not None else StageGates()
-        self._commit_hook = commit_hook
+        self._gates = resolved.gates if resolved.gates is not None else StageGates()
+        self._commit_hook = resolved.commit_hook
+        self._profiles_root = resolved.profiles_root
+        self._transcripts_dir = resolved.transcripts_dir
 
     def run(self, request: StageRunRequest) -> StageRunResult:
         """Run entry gates, the agent call, exit gates, then the commit hook.
@@ -176,32 +198,30 @@ class StageRunner:
             attempt=request.attempt,
             workspace_path=request.workspace_path,
         )
-        self._record(context, EventType.STAGE_STARTED)
+        # None for an orchestrator-only stage (S0/S6/S8, requires_agent=
+        # False) — there's no real agent call, so no transcript either;
+        # an id implying one exists would be misleading.
+        agent_call_id = (
+            f"{context.stage_id.value}-{context.attempt}"
+            if request.spec.requires_agent
+            else None
+        )
+        self._record(context, EventType.STAGE_STARTED, agent_call_id=agent_call_id)
         try:
-            self._run_gates(self._gates.entry, context)
+            self._run_gates(self._gates.entry, context, agent_call_id)
 
             response = (
-                self._executor.execute(
-                    AgentCallRequest(
-                        profile_name=request.spec.owner_profile or "",
-                        scenario_id=request.scenario_id,
-                        stage=request.spec.stage_id.value,
-                        attempt=request.attempt,
-                        rendered_prompt=request.rendered_prompt,
-                        workspace_path=str(request.workspace_path),
-                        timeout_seconds=request.timeout_seconds,
-                        budget_usd=request.budget_usd,
-                    )
-                )
+                self._execute_and_record_transcript(request, context, agent_call_id)
                 if request.spec.requires_agent
                 else NO_AGENT_RESPONSE
             )
 
-            self._run_gates(self._gates.exit, context)
+            self._run_gates(self._gates.exit, context, agent_call_id)
         except StageGateFailure as exc:
             self._record(
                 context,
                 EventType.STAGE_FINISHED,
+                agent_call_id=agent_call_id,
                 payload={
                     "status": StageStatus.FAILED.value,
                     "outcome": "gate_failure",
@@ -223,6 +243,7 @@ class StageRunner:
         self._record(
             context,
             EventType.STAGE_FINISHED,
+            agent_call_id=agent_call_id,
             payload={
                 "status": status.value,
                 "outcome": response.outcome.value,
@@ -231,12 +252,65 @@ class StageRunner:
         )
         return StageRunResult(status=status, response=response, commit=commit)
 
-    def _run_gates(self, gates: Sequence[Gate], context: StageContext) -> None:
+    def _execute_and_record_transcript(
+        self,
+        request: StageRunRequest,
+        context: StageContext,
+        agent_call_id: str | None,
+    ) -> AgentCallResponse:
+        response = self._executor.execute(
+            AgentCallRequest(
+                profile_name=request.spec.owner_profile or "",
+                scenario_id=request.scenario_id,
+                stage=request.spec.stage_id.value,
+                attempt=request.attempt,
+                rendered_prompt=request.rendered_prompt,
+                workspace_path=str(request.workspace_path),
+                timeout_seconds=request.timeout_seconds,
+                budget_usd=request.budget_usd,
+            )
+        )
+        if (
+            self._transcripts_dir is not None
+            and request.spec.owner_profile
+            and agent_call_id is not None
+        ):
+            write_transcript(
+                self._transcripts_dir,
+                AgentCallTranscript(
+                    agent_call_id=agent_call_id,
+                    run_id=context.run_id,
+                    stage=context.stage_id.value,
+                    attempt=context.attempt,
+                    role=request.spec.owner_profile,
+                    profile_version_hash=self._profile_version_hash(
+                        request.spec.owner_profile
+                    ),
+                    prompt=request.rendered_prompt,
+                    response=response,
+                ),
+            )
+        return response
+
+    def _profile_version_hash(self, profile_name: str) -> str | None:
+        if self._profiles_root is None:
+            return None
+        try:
+            return load_profile(
+                self._profiles_root / f"{profile_name}.toml"
+            ).version_hash
+        except ConfigValidationError:
+            return None
+
+    def _run_gates(
+        self, gates: Sequence[Gate], context: StageContext, agent_call_id: str | None
+    ) -> None:
         for gate in gates:
             outcome = gate.check(context)
             self._record(
                 context,
                 EventType.GATE_RESULT,
+                agent_call_id=agent_call_id,
                 payload={
                     "gate_name": outcome.gate_name,
                     "passed": outcome.passed,
@@ -250,6 +324,7 @@ class StageRunner:
         self,
         context: StageContext,
         event_type: EventType,
+        agent_call_id: str | None = None,
         payload: dict[str, object] | None = None,
     ) -> None:
         self._event_log.append(
@@ -259,6 +334,7 @@ class StageRunner:
                 recorded_at=self._clock(),
                 stage=context.stage_id.value,
                 attempt=context.attempt,
+                agent_call_id=agent_call_id,
                 payload=payload or {},
             )
         )

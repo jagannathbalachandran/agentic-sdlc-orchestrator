@@ -61,3 +61,21 @@ class AgentCallResponse(BaseModel):
     duration_seconds: float
     cost_usd: float | None = None
     session_id: str | None = None
+
+
+class AgentCallTranscript(BaseModel):
+    """One agent call's full record (C8-AC4: "every call records role,
+    profile version, prompt, response, duration, outcome"; §11's `agents/`
+    directory) — written once per call, regardless of executor kind, so a
+    real and a mock run leave the same kind of record on disk.
+    """
+
+    agent_call_id: str
+    run_id: str
+    stage: str
+    attempt: int
+    task_id: str | None = None
+    role: str
+    profile_version_hash: str | None = None
+    prompt: str
+    response: AgentCallResponse
