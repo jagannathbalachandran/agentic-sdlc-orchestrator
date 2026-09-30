@@ -118,11 +118,18 @@ class StageRunRequest:
 
 @dataclass(frozen=True)
 class StageRunResult:
-    """What one stage run produced."""
+    """What one stage run produced.
+
+    `commits` is only non-empty for a `ONE_PER_TASK` stage (S5a, T9.6) —
+    every other stage still reports its single commit via `commit` alone,
+    unchanged; `_record_batch_result` (engine/fsm.py) prefers `commits` when
+    it's non-empty.
+    """
 
     status: StageStatus
     response: AgentCallResponse
     commit: str | None
+    commits: tuple[str, ...] = ()
 
 
 class StageGateFailure(Exception):

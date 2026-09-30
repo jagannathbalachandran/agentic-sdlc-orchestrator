@@ -109,6 +109,37 @@ def commit_all(path: Path, message: str) -> str:
         return current_commit(path)
 
 
+def commit_paths(path: Path, paths: tuple[str, ...], message: str) -> str:
+    """Like `commit_all`, but stages only `paths` (S5a's per-task loop, T9.6)
+    — scoping `git add` to the task's own reported `files_written` instead
+    of the whole workspace shrinks (doesn't eliminate — a sibling branch's
+    own `git add -A` can still sweep an as-yet-uncommitted file in) the same
+    cross-branch race `commit_all`'s own docstring already documents,
+    without needing full path-partitioning enforcement at commit time.
+    Falls back to `commit_all` when `paths` is empty (nothing reported
+    written — stage whatever's actually on disk rather than committing
+    nothing).
+    """
+    if not paths:
+        return commit_all(path, message)
+    with _COMMIT_LOCK:
+        run_git(path, "add", "--", *paths)
+        if _nothing_staged(path):
+            return current_commit(path)
+        run_git(
+            path,
+            "-c",
+            f"user.name={ORCHESTRATOR_COMMIT_AUTHOR_NAME}",
+            "-c",
+            f"user.email={ORCHESTRATOR_COMMIT_AUTHOR_EMAIL}",
+            "commit",
+            "-q",
+            "-m",
+            message,
+        )
+        return current_commit(path)
+
+
 def current_commit(path: Path) -> str:
     """Return the current HEAD commit SHA."""
     return run_git(path, "rev-parse", "HEAD")

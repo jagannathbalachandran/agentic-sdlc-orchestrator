@@ -1,0 +1,8 @@
+{
+  "summary": "Two tasks under FR-1: T-1.1 (DD-1) and T-1.2 (DD-2).",
+  "produced_ids": ["T-1.1", "T-1.2"],
+  "files_written": ["03-plan.md"],
+  "files": {
+    "03-plan.md": "# Plan\n\n## FR-1\n- T-1.1 (DD-1): implement thing A.\n- T-1.2 (DD-2): implement thing B.\n"
+  }
+}

@@ -1,0 +1,8 @@
+{
+  "summary": "Derived FR-1 with two acceptance criteria.",
+  "produced_ids": ["FR-1"],
+  "files_written": ["01-requirements.md"],
+  "files": {
+    "01-requirements.md": "# Requirements\n\n## FR-1\nCites: REQ-1\nPer-task demo requirement.\n\n### FR-1.AC1\nThing A works.\n\n### FR-1.AC2\nThing B works.\n"
+  }
+}

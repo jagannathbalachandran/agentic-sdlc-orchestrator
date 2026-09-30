@@ -58,8 +58,11 @@ from orchestrator.audit.traceability import (
 from orchestrator.config.schema import RetryLimits
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
+from orchestrator.engine.plan_tasks import PlanTask, parse_fr_to_req, parse_plan_tasks
 from orchestrator.engine.replanning import invalidate_from
 from orchestrator.engine.runner import (
+    NO_AGENT_RESPONSE,
+    Clock,
     CommitHook,
     CommitTrailerContext,
     StageGates,
@@ -86,6 +89,11 @@ from orchestrator.gates.traceability_gate import (
     PlanCitationGate,
     RequirementsCitationGate,
 )
+from orchestrator.models.agent_io import (
+    AgentCallOutcome,
+    AgentCallRequest,
+    AgentCallResponse,
+)
 from orchestrator.models.approvals import (
     ApprovalCheckpointKind,
     ApprovalDecision,
@@ -106,6 +114,7 @@ from orchestrator.policies.base import Policy, PolicyOutcome, compute_diff
 from orchestrator.workspace.git_ops import (
     clone_repo,
     commit_all,
+    commit_paths,
     current_commit_or_empty_tree,
     ensure_on_branch,
     init_repo,
@@ -447,6 +456,13 @@ class _LoopResources:
 def _build_runner(
     resources: _LoopResources, graph_state: GraphState, spec: StageSpec
 ) -> StageRunner:
+    if spec.commit_strategy is CommitStrategy.ONE_PER_TASK:
+        return _PerTaskS5aRunner(
+            executor=resources.executor,
+            event_log=resources.event_log,
+            clock=lambda: datetime.now(UTC),
+            run_id=resources.ref.run_id,
+        )
     return StageRunner(
         executor=resources.executor,
         event_log=resources.event_log,
@@ -566,6 +582,132 @@ def _s8_commit_hook(resources: _LoopResources, graph_state: GraphState) -> Commi
         return None  # S8's commit_strategy is NONE: nothing to commit in the workspace
 
     return hook
+
+
+def _plan_tasks(workspace_path: Path) -> tuple[PlanTask, ...]:
+    plan_path = workspace_path / "03-plan.md"
+    if not plan_path.is_file():
+        return ()
+    return parse_plan_tasks(plan_path.read_text(encoding="utf-8"))
+
+
+def _fr_to_req(workspace_path: Path) -> dict[str, str]:
+    requirements_path = workspace_path / "01-requirements.md"
+    if not requirements_path.is_file():
+        return {}
+    return parse_fr_to_req(requirements_path.read_text(encoding="utf-8"))
+
+
+def _task_prompt(task: PlanTask) -> str:
+    return (
+        f"Implement plan task {task.task_id} (cites {task.dd_id}, under "
+        f"{task.fr_id}): {task.description}\n\nOnly touch the files this "
+        "task calls for. Do not implement any other task from 03-plan.md in "
+        "this call — each task gets its own call and its own commit."
+    )
+
+
+class _PerTaskS5aRunner(StageRunner):
+    """S5a: one developer call per 03-plan.md task, in plan order, each
+    committed separately with Task/FR/Req/Run/Stage trailers (C10-AC2, D-8,
+    requirements.md §12's "per-task commits"). `engine/fsm.py`'s own
+    `_build_runner` is what routes a stage here — keyed on `StageSpec.
+    commit_strategy is ONE_PER_TASK`, not on `stage_id`, so a test's bespoke
+    S5a stub spec (a different `commit_strategy`, same `StageId.
+    S5A_IMPLEMENT`) still gets the standard single-call `StageRunner`
+    unaffected — the same reasoning as `requires_agent` not being keyed on
+    `owner_profile` (see `StageSpec`'s own docstring).
+
+    No entry/exit gates: S5a's only configured gate is the stub `SchemaGate`
+    (always passes trivially), not worth threading through N per-task calls.
+    S4's own exit gate (`PlanCitationGate`, T8.1) already guarantees
+    03-plan.md has at least one well-formed task under every FR by the time
+    S5a ever runs in the real graph — `_no_tasks_result` below is a safety
+    net for a malformed/missing plan, not a path the real graph can reach.
+    """
+
+    def __init__(
+        self, executor: Executor, event_log: EventLog, clock: Clock, run_id: str
+    ) -> None:
+        super().__init__(executor=executor, event_log=event_log, clock=clock)
+        self._run_id = run_id
+
+    def run(self, request: StageRunRequest) -> StageRunResult:
+        context = StageContext(
+            run_id=request.run_id,
+            stage_id=request.spec.stage_id,
+            attempt=request.attempt,
+            workspace_path=request.workspace_path,
+        )
+        self._record(context, EventType.STAGE_STARTED)
+
+        tasks = _plan_tasks(request.workspace_path)
+        if not tasks:
+            return self._no_tasks_result(context)
+
+        fr_to_req = _fr_to_req(request.workspace_path)
+        commits: list[str] = []
+        response = NO_AGENT_RESPONSE
+        for task in tasks:
+            response = self._executor.execute(
+                AgentCallRequest(
+                    profile_name=request.spec.owner_profile or "",
+                    scenario_id=request.scenario_id,
+                    stage=request.spec.stage_id.value,
+                    attempt=request.attempt,
+                    task_id=task.task_id,
+                    rendered_prompt=_task_prompt(task),
+                    workspace_path=str(request.workspace_path),
+                    timeout_seconds=request.timeout_seconds,
+                    budget_usd=request.budget_usd,
+                )
+            )
+            if response.outcome is not AgentCallOutcome.SUCCESS:
+                self._record(
+                    context,
+                    EventType.STAGE_FINISHED,
+                    {"status": StageStatus.FAILED.value},
+                )
+                return StageRunResult(
+                    status=StageStatus.FAILED,
+                    response=response,
+                    commit=commits[-1] if commits else None,
+                    commits=tuple(commits),
+                )
+            message = commit_message_with_trailers(
+                f"{task.task_id}: {task.description}",
+                CommitTrailerContext(
+                    run_id=self._run_id,
+                    stage_label=request.spec.stage_id.value,
+                    task_id=task.task_id,
+                    fr_id=task.fr_id,
+                    req_id=fr_to_req.get(task.fr_id),
+                ),
+            )
+            commits.append(
+                commit_paths(request.workspace_path, response.files_written, message)
+            )
+
+        self._record(
+            context, EventType.STAGE_FINISHED, {"status": StageStatus.PASSED.value}
+        )
+        return StageRunResult(
+            status=StageStatus.PASSED,
+            response=response,
+            commit=commits[-1] if commits else None,
+            commits=tuple(commits),
+        )
+
+    def _no_tasks_result(self, context: StageContext) -> StageRunResult:
+        response = AgentCallResponse(
+            outcome=AgentCallOutcome.INVALID_OUTPUT,
+            summary="03-plan.md has no parseable tasks",
+            duration_seconds=0.0,
+        )
+        self._record(
+            context, EventType.STAGE_FINISHED, {"status": StageStatus.FAILED.value}
+        )
+        return StageRunResult(status=StageStatus.FAILED, response=response, commit=None)
 
 
 # Stage-specific task instructions (what to do *this call*), on top of the
@@ -940,7 +1082,7 @@ def _record_batch_result(
         stage_id=spec.stage_id,
         status=result.status,
         attempts=attempts,
-        commits=(result.commit,) if result.commit else (),
+        commits=result.commits or ((result.commit,) if result.commit else ()),
     )
     graph_state.agent_call_count += 1
     if result.status is StageStatus.PASSED:

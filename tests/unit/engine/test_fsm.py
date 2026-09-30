@@ -546,8 +546,10 @@ def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
         if isinstance(event["payload"], dict)
         and event["payload"]["gate_name"] == "schema"
     ]
-    # Two SchemaGate checks (entry + exit) per stage, for all nine stages.
-    assert len(schema_gate_hits) == len(GRAPH) * 2
+    # Two SchemaGate checks (entry + exit) per stage — except S5a, whose real
+    # per-task runner (T9.6, C10-AC2) skips gates entirely (SchemaGate's a
+    # stub anyway; not worth threading through N per-task calls).
+    assert len(schema_gate_hits) == (len(GRAPH) - 1) * 2
     existence_gate_hits = [
         event
         for event in gate_events

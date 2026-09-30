@@ -11,6 +11,7 @@ from orchestrator.workspace.git_ops import (
     EMPTY_TREE_SHA,
     clone_repo,
     commit_all,
+    commit_paths,
     create_branch,
     current_branch,
     current_commit,
@@ -39,6 +40,40 @@ def test_commit_all_stages_everything_and_returns_the_new_sha(tmp_path: Path) ->
     sha = _init_repo_with_one_commit(repo)
     assert len(sha) == 40
     assert current_commit(repo) == sha
+
+
+def test_commit_paths_stages_only_the_given_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_one_commit(repo)
+    (repo / "tracked.py").write_text("tracked\n", encoding="utf-8")
+    (repo / "untracked.py").write_text("untracked\n", encoding="utf-8")
+
+    sha = commit_paths(repo, ("tracked.py",), "add tracked.py only")
+
+    assert current_commit(repo) == sha
+    assert run_git(repo, "status", "--porcelain") == "?? untracked.py"
+
+
+def test_commit_paths_with_no_paths_falls_back_to_commit_all(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    _init_repo_with_one_commit(repo)
+    (repo / "everything.py").write_text("x\n", encoding="utf-8")
+
+    sha = commit_paths(repo, (), "commit everything")
+
+    assert current_commit(repo) == sha
+    assert run_git(repo, "status", "--porcelain") == ""
+
+
+def test_commit_paths_with_nothing_new_to_stage_returns_current_head(
+    tmp_path: Path,
+) -> None:
+    repo = tmp_path / "repo"
+    sha = _init_repo_with_one_commit(repo)
+
+    result = commit_paths(repo, ("README.md",), "no-op")
+
+    assert result == sha
 
 
 def test_create_branch_switches_to_a_new_branch(tmp_path: Path) -> None:

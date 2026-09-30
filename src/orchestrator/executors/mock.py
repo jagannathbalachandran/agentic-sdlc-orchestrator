@@ -31,11 +31,14 @@ class MockExecutor:
     def execute(self, request: AgentCallRequest) -> AgentCallResponse:
         """Replay the matching fixture, or the generic fallback, into the workspace."""
         fixture = self._load_fixture(
-            request.scenario_id, request.stage, request.attempt
+            request.scenario_id, request.stage, request.attempt, request.task_id
         )
         if fixture is None:
             fixture = self._load_fixture(
-                GENERIC_FALLBACK_SCENARIO_ID, request.stage, request.attempt
+                GENERIC_FALLBACK_SCENARIO_ID,
+                request.stage,
+                request.attempt,
+                request.task_id,
             )
         if fixture is None:
             return AgentCallResponse(
@@ -58,24 +61,31 @@ class MockExecutor:
         )
 
     def _load_fixture(
-        self, scenario_id: str, stage: str, attempt: int
+        self, scenario_id: str, stage: str, attempt: int, task_id: str | None
     ) -> dict[str, Any] | None:
-        for path in self._candidate_paths(scenario_id, stage, attempt):
+        for path in self._candidate_paths(scenario_id, stage, attempt, task_id):
             if path.is_file():
                 data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
                 return data
         return None
 
     def _candidate_paths(
-        self, scenario_id: str, stage: str, attempt: int
+        self, scenario_id: str, stage: str, attempt: int, task_id: str | None
     ) -> tuple[Path, ...]:
-        """The attempt-specific fixture first; the bare `{stage}.json` as a
-        fallback regardless of attempt — most tests/scenarios don't need
-        attempt-specific content, only the ones that provide it (e.g. a
-        bounded-retry test's second attempt) actually get different content.
+        """The task-specific fixture first (S5a's per-task calls, T9.6 —
+        skipped when there's no task_id); then the attempt-specific fixture;
+        then the bare `{stage}.json` as a fallback regardless of attempt —
+        most tests/scenarios don't need attempt- or task-specific content,
+        only the ones that provide it (e.g. a bounded-retry test's second
+        attempt, or a per-task test's second task) actually get different
+        content.
         """
         scenario_dir = self._fixtures_root / scenario_id
+        task_specific = (
+            (scenario_dir / f"{stage}-{task_id}.json",) if task_id is not None else ()
+        )
         return (
+            *task_specific,
             scenario_dir / f"{stage}-{attempt}.json",
             scenario_dir / f"{stage}.json",
         )

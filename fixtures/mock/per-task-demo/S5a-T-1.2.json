@@ -1,0 +1,9 @@
+{
+  "summary": "Implemented thing B per T-1.2.",
+  "produced_ids": ["T-1.2"],
+  "files_written": ["src/thing_b.py", "tests/unit/test_thing_b.py"],
+  "files": {
+    "src/thing_b.py": "\"\"\"Thing B.\"\"\"\n",
+    "tests/unit/test_thing_b.py": "\"\"\"Test for thing B.\"\"\"\n"
+  }
+}
