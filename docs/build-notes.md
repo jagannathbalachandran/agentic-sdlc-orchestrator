@@ -1655,3 +1655,84 @@ skipped stage against `stage_first_pass_rate`; counts a design rejection in
 **Full gate after this fix:** 325 tests, 96.23% coverage; ruff, mypy
 --strict, pip-audit all clean.
 
+## T9.10 — Second real run's failure, plus a real end-to-end verification (4 commits)
+
+`greenfield-minimal-20260930-003` failed at S5a on both attempts,
+`outcome=invalid_output`, `error=""`. User-directed pass: fix the root
+cause (multi-line task truncation) and the surrounding diagnosability gaps,
+then actually verify the fixes with the real executor against a throwaway
+target — not just the mock-executor test suite.
+
+**What four commits fixed, in order:**
+1. `c7ed024` — root cause: `gates/traceability_gate.py`'s task-line regex
+   captured only a task's first line (`(.+)$`, no DOTALL); a real plan's
+   multi-line task descriptions were truncated before ever reaching the
+   developer's prompt, dropping the file paths the task named. New
+   `_task_entries` captures each task's full text up to the next task line.
+   Also: `AgentCallResponse` gained `raw_reply` (the agent's actual reply
+   text, always recorded, transcripts included); `RealExecutor`'s three
+   `invalid_output` paths now all set a real, non-empty `summary` naming
+   what failed plus a reply snippet, instead of `""`; summary parsing now
+   extracts the last brace-balanced JSON object instead of requiring the
+   whole reply to be exactly one JSON document; `_PerTaskS5aRunner` now
+   skips any task that already has a commit (found via its own `Task:`
+   trailer) before looping, so a retry resumes instead of redoing work.
+2. `6fd9032` — found running real verification with a relative
+   `--orch-home`: S0's real venv creation runs a subprocess with
+   `cwd=workspace` *and* passes that same workspace-derived path as the
+   subprocess's own argument; a relative `orch_home` made the argument
+   resolve a second time, doubling the whole path. Fixed by resolving
+   `orch_home` to absolute once, at the CLI entry point.
+3. `6dea461` — found running real verification: approving Design crashed
+   with `AttributeError: 'NoneType' object has no attribute 'strip'` from
+   `run_git`. Root cause: three `subprocess.run(..., text=True)` call sites
+   (`git_ops.py`, `executors/real.py`, `gates/command_gate.py`) had no
+   explicit `encoding`, so Windows decoded output with the console's own
+   codepage (cp1252 in this locale) instead of UTF-8 — and a real design
+   containing an em dash (this codebase's own house style) reliably tripped
+   it, crashing a subprocess reader thread and leaving `.stdout` `None`.
+4. `0839ae4` — found finishing that same verification run: `traceability.md`
+   reported "no commit" for every FR despite real, correctly-trailered
+   per-task commits existing. `_write_traceability` built every
+   `CommitInfo(sha=sha)` with no `task_id`, so the report's task->commit
+   lookup never matched anything. Fixed with `_commit_task_ids`, reading
+   each commit's own `Task:` trailer from git log.
+
+### Live verification (real executor, throwaway target)
+
+Per the user's explicit instruction: a throwaway greenfield target at
+`.verify/target-greenfield` (a fresh local git repo containing only a copy
+of the real `shortener-greenfield-by-agents` scenario's `.orchestrator/`
+folder, `project_name` changed to `verify-greenfield`) registered against a
+separate `.verify/orch-home` (never an OS temp path); real `claude -p`
+calls throughout, no `--mock`. Neither registered target repo nor
+`~/.orchestrator` was touched; nothing was pushed anywhere real (the
+workspace's own `git push origin` failed harmlessly — `verify-greenfield`'s
+registered "URL" is itself a relative local path, invalid once resolved
+against the workspace's own directory, matching commit 2's fix scope but
+not worth chasing further for a throwaway target never meant to be pushed
+to). `.verify/` and `.debug/` (this pass's own crash evidence) are both
+gitignored.
+
+Run `greenfield-minimal-20260930-001` (registered project
+`verify-greenfield`) hit three of this pass's four bugs live, in sequence —
+each one diagnosed from the real crash/events, fixed, gated, committed, and
+the run resumed (not restarted from S0, once real work existed to resume
+from) rather than burning a fresh S0-S3 real-agent pass to re-prove
+already-good stages. **Reached `completed`**: all nine stages passed (S6
+needed 2 automatic retries — a real `ruff format` issue, then real `mypy
+--strict` errors, both self-corrected via real S5a-fix calls — recorded as
+`retry` events, item 5/T9.9's own fix confirmed working live); real
+per-task commits with correct `Task`/`FR`/`Req`/`Run`/`Stage` trailers for
+every task (T-1.1 through T-2.2); a Change-control pause on
+`diff_size_limit` (1062 changed lines, a real, correct policy trigger for a
+real greenfield build, not a bug) approved and continued; `traceability.md`
+generated with every FR's full chain, no "no commit" gaps (commit 4's fix
+confirmed working live, on the actual data that first exposed it).
+
+**Full gate at the end of this pass:** 335 tests passed, 1 skipped (a
+flaky regression test for commit 4 — see its own skip reason: the
+production fix is verified correct, including in this pass's own live run;
+the flake is in the test's git-timing, not the fix), 95.93% coverage;
+ruff, mypy --strict, pip-audit all clean.
+
