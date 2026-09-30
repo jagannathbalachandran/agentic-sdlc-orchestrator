@@ -1060,3 +1060,58 @@ Release. Full gate: 217 tests, 96.98% coverage.
   required again) rather than that feedback changes the output, which isn't
   something the current fixture format can represent.
 
+## T7.3 — Fault-injection hook (G-16)
+
+**What changed:** `GraphState` gained `inject_fault` (whether this run's
+scenario flagged injection) and `fault_injected` (whether it has already
+happened this run — a guard against a later, unrelated invalidation cascade,
+e.g. T7.1's S7b-findings retry resetting S6's attempt counter to 0, being
+mistaken for a fresh "attempt 1" and re-triggering injection a second time).
+`DriveRequest` gained `inject_fault`, copied onto a brand-new `GraphState` the
+first time one is created for a run (same pattern as `base_commit`) — it's
+meaningless on a resumed run's `DriveRequest` (approve/reject/answer rebuild
+one from just `scenario_id`), since the flag already persisted into
+`GraphState` on the run's first `drive()` call.
+
+`engine/fsm.py`'s `_record_batch_result` checks, right after computing a
+batch member's attempt count: if this is S6, `inject_fault` is set, it hasn't
+fired yet, and this is attempt 1 — `_inject_fault()` writes
+`tests/acceptance/test_injected_fault.py` (a deterministically failing test,
+content included directly since there's no real "run the target's test
+suite" mechanism yet to make an actually-failing test file matter — Phase 1
+scope, same boundary T6.2's S6 already documented) and appends an
+`EventType.FAULT_INJECTED` event with `injected=True` (a first-class
+`EventDraft` field built well before this task, evidently anticipating it).
+The batch member's `StageRunResult` is then replaced (frozen dataclass, so a
+new instance) with `status=FAILED`, `commit=None` — forcing exactly the one
+S6 failure G-16 asks for, regardless of what the executor's own S6 fixture/
+call would otherwise have produced. From there, **T7.1's existing S6-failure
+retry logic runs completely unmodified** — one developer fix call, then S6's
+attempt 2 (no re-injection, since `fault_injected` is now `True`) proceeds
+normally.
+
+**Covered:** G-16.
+
+**Tests:** `tests/unit/engine/test_fsm.py`'s
+`test_fault_injection_forces_one_s6_failure_then_a_normal_retry_passes` —
+S6's own fixture would `PASS` on every attempt if not for the forced
+override (proving the *injection*, not a missing fixture, causes the first
+failure); asserts the injected file lands in the workspace, `attempts == 2`,
+`fault_injected` flips `True`, and the `fault_injected` event's payload names
+the file and carries `injected: true`. Full gate: 218 tests, 97.01%
+coverage.
+
+**Deferred / assumed:**
+- `run.py` (and the other 3 CLI commands) don't yet load a scenario's real
+  `inject_fault` flag from its `.orchestrator/scenarios/<id>.toml` — that
+  needs project-registry -> target-repo-path -> scenario-config resolution
+  that doesn't exist anywhere in this codebase yet (a larger, pre-existing gap
+  already flagged in T6.1/T6.2's build notes, not created by this task).
+  `DriveRequest.inject_fault` defaults to `False` for all real CLI usage today;
+  the mechanism is fully built and tested, just not yet wired to a real
+  config-loaded value — T5.3's brownfield scenario TOML already carries
+  `inject_fault = true`, ready for whenever that wiring lands.
+- The injected test's content doesn't get run against any real test suite
+  (none exists yet) — its presence in the workspace, and the forced `FAILED`
+  status, are what stand in for "the test actually failed" in Phase 1's engine.
+

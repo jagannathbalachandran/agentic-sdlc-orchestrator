@@ -98,3 +98,5 @@ class GraphState(BaseModel):
     started_at: datetime | None = None
     last_checkpoint_commit: str | None = None
     agent_call_count: int = 0
+    inject_fault: bool = False
+    fault_injected: bool = False

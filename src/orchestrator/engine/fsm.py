@@ -35,6 +35,7 @@ from orchestrator.engine.runner import (
     StageGates,
     StageRunner,
     StageRunRequest,
+    StageRunResult,
     no_op_commit,
     stage_commit_hook,
 )
@@ -108,12 +109,19 @@ class RunRef:
 
 @dataclass(frozen=True)
 class DriveRequest:
-    """Which run to advance, and (for a brand-new run) its scenario_id."""
+    """Which run to advance, and (for a brand-new run) its scenario_id.
+
+    `inject_fault` (G-16) only matters the first time a run's GraphState is
+    created — it's copied onto `GraphState.inject_fault` there and persists
+    from then on, so `approve`/`reject`/`answer` re-entering `drive()` for an
+    existing run don't need to (and can't easily) re-supply it.
+    """
 
     orch_home: Path
     project: str
     run_id: str
     scenario_id: str
+    inject_fault: bool = False
 
     @property
     def ref(self) -> RunRef:
@@ -214,7 +222,11 @@ def _load_or_init_graph_state(request: DriveRequest) -> GraphState:
     state_path = _state_path(request.ref)
     if state_path.is_file():
         return read_json(state_path, GraphState)
-    return GraphState(run_id=request.run_id, scenario_id=request.scenario_id)
+    return GraphState(
+        run_id=request.run_id,
+        scenario_id=request.scenario_id,
+        inject_fault=request.inject_fault,
+    )
 
 
 def _load_existing_graph_state(ref: RunRef) -> GraphState:
@@ -471,6 +483,44 @@ def _handle_s7b_findings(
     _invalidate(graph_state, StageId.S7B_REVIEW, attempts=attempts)
 
 
+INJECTED_FAULT_TEST_PATH = "tests/acceptance/test_injected_fault.py"
+INJECTED_FAULT_TEST_CONTENT = (
+    '"""Deliberately failing test, written by the orchestrator itself (G-16) to\n'
+    "demonstrate the S6->S5a retry loop on demand, not organically discovered.\n"
+    '"""\n\n'
+    "from __future__ import annotations\n\n\n"
+    "def test_injected_fault() -> None:\n"
+    '    raise AssertionError("G-16: deliberately injected fault")\n'
+)
+
+
+def _inject_fault(
+    resources: _LoopResources, graph_state: GraphState, attempt: int
+) -> None:
+    """G-16: write one failing acceptance test, attributed to the orchestrator
+    itself (not an agent) — deterministically forces exactly one S6 failure so
+    the S6->S5a retry loop (G-13) is reliably demonstrable, rather than
+    depending on a real agent call happening to fail on its own. `injected`
+    (a first-class `EventDraft` field, not buried in payload) keeps this event
+    trivially distinguishable from an organic failure in `events.jsonl`.
+    """
+    test_path = resources.workspace / INJECTED_FAULT_TEST_PATH
+    test_path.parent.mkdir(parents=True, exist_ok=True)
+    test_path.write_text(INJECTED_FAULT_TEST_CONTENT, encoding="utf-8")
+    resources.event_log.append(
+        EventDraft(
+            run_id=resources.ref.run_id,
+            event_type=EventType.FAULT_INJECTED,
+            recorded_at=datetime.now(UTC),
+            stage=StageId.S6_VERIFY.value,
+            attempt=attempt,
+            payload={"file": INJECTED_FAULT_TEST_PATH},
+            injected=True,
+        )
+    )
+    graph_state.fault_injected = True
+
+
 def _record_batch_result(
     resources: _LoopResources,
     graph_state: GraphState,
@@ -495,6 +545,22 @@ def _record_batch_result(
         ).attempts
         + 1
     )
+
+    should_inject = (
+        spec.stage_id is StageId.S6_VERIFY
+        and graph_state.inject_fault
+        and not graph_state.fault_injected
+        and attempts == 1
+    )
+    if should_inject:
+        _inject_fault(resources, graph_state, attempts)
+        # No real "run the target's test suite" mechanism exists yet (Phase 1
+        # scope) for the injected test to actually fail against — this is the
+        # deterministic stand-in until that real integration lands.
+        result = StageRunResult(
+            status=StageStatus.FAILED, response=result.response, commit=None
+        )
+
     graph_state.stages[spec.stage_id] = StageResult(
         stage_id=spec.stage_id,
         status=result.status,
