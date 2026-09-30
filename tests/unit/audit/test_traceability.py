@@ -42,6 +42,35 @@ def test_generate_traceability_report_has_no_gaps_for_a_complete_chain() -> None
     assert "tests/acceptance/test_fr1_ac1.py" in report
 
 
+def test_generate_traceability_report_has_no_gaps_with_real_titled_headings() -> None:
+    """T9.8 item 3: this module had its own, separate copy of FR_HEADING/
+    DD_HEADING/AC_HEADING that never accepted a title after the ID (the same
+    class of bug as item 2's citation gates) -- a real run's `## DD-1:
+    <title>` design would have produced a traceability.md with every FR
+    showing "no DD"/"no AC", even though every citation gate had passed.
+    """
+    inputs = TraceabilityInputs(
+        requirements_md=(
+            "# Requirements\n\n## FR-1: Shorten a URL\nCites: REQ-1\nbody\n\n"
+            "### FR-1.AC1: 201 on success\nac body\n"
+        ),
+        design_md="# Design\n\n## DD-1: URL shortening endpoint\nCites: FR-1\nbody\n",
+        plan_md=(
+            "# Plan\n\n## FR-1: Shorten a URL\n- T-1.1 (DD-1): implement the thing.\n"
+        ),
+        commits=COMMITS,
+        acceptance_test_files=ACCEPTANCE_TEST_FILES,
+    )
+
+    report = generate_traceability_report(inputs)
+
+    assert "## Gaps" in report
+    assert "None." in report
+    assert "FR-1.AC1" in report
+    assert "DD-1" in report
+    assert "T-1.1" in report
+
+
 def test_generate_traceability_report_flags_every_missing_link_in_the_chain() -> None:
     inputs = TraceabilityInputs(
         requirements_md="# Requirements\n\n## FR-1\nCites: REQ-1\nbody, no AC\n",

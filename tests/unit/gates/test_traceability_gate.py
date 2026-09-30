@@ -237,3 +237,20 @@ def test_plan_citation_gate_fails_when_there_are_no_fr_sections_at_all(
     (tmp_path / "03-plan.md").write_text("# Plan\n\nnothing here\n", encoding="utf-8")
     result = PlanCitationGate().check(_context(tmp_path))
     assert not result.passed
+
+
+def test_plan_citation_gate_uses_the_same_parser_s5a_does(tmp_path: Path) -> None:
+    """T9.8: a real run's S4 gate passed a plan whose own (separate, drifted)
+    parser then found zero tasks at S5a. `PlanCitationGate` now fails
+    whenever `gates.traceability_gate.parse_plan_tasks` -- the exact
+    function `engine/plan_tasks.py` wraps for S5a -- finds no tasks, even if
+    every other check in this gate somehow missed it.
+    """
+    from orchestrator.gates.traceability_gate import parse_plan_tasks
+
+    plan_md = "# Plan\n\n## FR-1: Shorten a URL\n- T-1.1 (DD-1): does the thing.\n"
+    (tmp_path / "03-plan.md").write_text(plan_md, encoding="utf-8")
+
+    assert parse_plan_tasks(plan_md)  # sanity: the shared parser finds it too
+    result = PlanCitationGate().check(_context(tmp_path))
+    assert result.passed

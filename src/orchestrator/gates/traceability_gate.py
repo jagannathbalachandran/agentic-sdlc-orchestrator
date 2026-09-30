@@ -29,6 +29,9 @@ FR_HEADING = re.compile(r"^##\s+(FR-\d+)\b.*$", re.MULTILINE)
 DD_HEADING = re.compile(r"^##\s+(DD-\d+)\b.*$", re.MULTILINE)
 CITES_LINE = re.compile(r"^Cites:\s*(.+)$", re.MULTILINE)
 TASK_LINE = re.compile(r"^-\s+T-\d+\.\d+\s+\(DD-\d+\):", re.MULTILINE)
+TASK_LINE_CAPTURING = re.compile(
+    r"^-\s+(T-\d+\.\d+)\s+\((DD-\d+)\):\s*(.+)$", re.MULTILINE
+)
 
 
 def _sections(text: str, heading: re.Pattern[str]) -> dict[str, str]:
@@ -149,6 +152,24 @@ class DesignCitationGate:
         )
 
 
+def parse_plan_tasks(plan_md: str) -> tuple[tuple[str, str, str, str], ...]:
+    """Every `- T-n.n (DD-n): <description>` task line in `plan_md`, in file
+    order, as `(fr_id, task_id, dd_id, description)` — the single source of
+    truth for 03-plan.md's task convention. Both `PlanCitationGate` (S4's
+    exit gate, below) and `engine/plan_tasks.py` (S5a's per-task loop) call
+    this, so they can never drift apart again: a real run found S4's gate
+    already using this file's own (correctly `\\b.*$`-tolerant) `FR_HEADING`
+    while `engine/plan_tasks.py` kept its own, separate, still-bare-heading-
+    only copy — the plan passed S4's gate, then S5a's own parser found "no
+    parseable tasks" in the exact same file (T9.8).
+    """
+    return tuple(
+        (fr_id, task_id, dd_id, description.strip())
+        for fr_id, body in _sections(plan_md, FR_HEADING).items()
+        for task_id, dd_id, description in TASK_LINE_CAPTURING.findall(body)
+    )
+
+
 @dataclass(frozen=True)
 class PlanCitationGate:
     """S4 exit gate: every task cites at least one DD and sits under an FR."""
@@ -176,6 +197,16 @@ class PlanCitationGate:
                 gate_name=self.gate_name,
                 passed=False,
                 details=f"no task citing a DD found under {', '.join(empty)}",
+            )
+        # Belt-and-braces (T9.8 item 2): fail if the *shared* parser S5a
+        # itself will use finds zero tasks, even if the per-FR check above
+        # somehow didn't catch it -- a bad plan must be caught here, where
+        # the planner can retry, not at S5a with no gate to retry against.
+        if not parse_plan_tasks(text):
+            return GateOutcome(
+                gate_name=self.gate_name,
+                passed=False,
+                details="no tasks parseable from 03-plan.md",
             )
         return GateOutcome(
             gate_name=self.gate_name,

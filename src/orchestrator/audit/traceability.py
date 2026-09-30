@@ -23,23 +23,29 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
-FR_HEADING = re.compile(r"^##\s+(FR-\d+)\s*$", re.MULTILINE)
-AC_HEADING = re.compile(r"^###\s+(FR-\d+\.AC\d+)\s*$", re.MULTILINE)
-DD_HEADING = re.compile(r"^##\s+(DD-\d+)\s*$", re.MULTILINE)
-CITES_LINE = re.compile(r"^Cites:\s*(.+)$", re.MULTILINE)
-TASK_LINE = re.compile(r"^-\s+(T-\d+\.\d+)\s+\((DD-\d+)\):", re.MULTILINE)
+from orchestrator.gates.traceability_gate import (
+    CITES_LINE,
+    DD_HEADING,
+    FR_HEADING,
+    TASK_LINE_CAPTURING,
+    _sections,
+)
+
+# AC headings are this module's own convention (T8.1), not shared with any
+# gate -- `## FR-n` / `## DD-n` / `Cites:` / task-line all now come from
+# gates/traceability_gate.py instead of a separate copy (T9.8): a real run
+# found S4's gate and this generator had drifted onto different regexes
+# (`\s*$`, bare heading only, here vs. the gate's real `\b.*$`), so a design
+# with real `## DD-1: <title>` headings would have produced an empty
+# traceability.md even though every citation gate had already passed it.
+AC_HEADING = re.compile(r"^###\s+(FR-\d+\.AC\d+)\b.*$", re.MULTILINE)
 TEST_TRACES_LINE = re.compile(r"^#\s*Traces:\s*(.+)$", re.MULTILINE)
 
 
-def _sections(text: str, heading: re.Pattern[str]) -> dict[str, str]:
-    """Map each heading ID to the text between it and the next same heading."""
-    matches = list(heading.finditer(text))
-    return {
-        match.group(1): text[
-            match.end() : matches[i + 1].start() if i + 1 < len(matches) else len(text)
-        ]
-        for i, match in enumerate(matches)
-    }
+def _task_line_findall(body: str) -> list[tuple[str, str]]:
+    """`(task_id, dd_id)` pairs only -- this module never needs the task's
+    description text, unlike `gates.traceability_gate.parse_plan_tasks`."""
+    return [(task_id, dd_id) for task_id, dd_id, _ in TASK_LINE_CAPTURING.findall(body)]
 
 
 def _cited_ids(section_text: str) -> tuple[str, ...]:
@@ -102,7 +108,7 @@ def _dd_ids_by_fr(design_md: str, fr_ids: set[str]) -> dict[str, list[str]]:
 def _tasks_by_fr(plan_md: str, fr_ids: set[str]) -> dict[str, list[tuple[str, str]]]:
     by_fr: dict[str, list[tuple[str, str]]] = {fr: [] for fr in fr_ids}
     for fr_id, body in _sections(plan_md, FR_HEADING).items():
-        by_fr.setdefault(fr_id, []).extend(TASK_LINE.findall(body))
+        by_fr.setdefault(fr_id, []).extend(_task_line_findall(body))
     return by_fr
 
 
@@ -229,7 +235,9 @@ def backward_trace(inputs: TraceabilityInputs, commit_sha: str) -> BackwardTrace
         (
             fr
             for fr, body in _sections(inputs.plan_md, FR_HEADING).items()
-            if any(found_task == task_id for found_task, _dd in TASK_LINE.findall(body))
+            if any(
+                found_task == task_id for found_task, _dd in _task_line_findall(body)
+            )
         ),
         None,
     )
