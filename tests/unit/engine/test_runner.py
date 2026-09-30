@@ -83,7 +83,11 @@ def test_stage_runner_drives_s0_then_s1_and_records_events_in_order(
 
     assert s0_result.status is StageStatus.PASSED
     assert s1_result.status is StageStatus.PASSED
-    assert (workspace / "00-source.md").is_file()
+    # S0's real spec is requires_agent=False (engine/fsm.py's own S0 commit
+    # hook does the real workspace prep + 00-source.md write, exercised in
+    # tests/unit/engine/test_fsm.py) — this test, using StageRunner directly
+    # with no fsm.py-level commit hook, only proves the two-stage sequencing
+    # and event ordering below.
     assert (workspace / "01-requirements.md").is_file()
 
     events = _read_events(events_path)

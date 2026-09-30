@@ -16,8 +16,8 @@ from orchestrator.policies.registry import (
 )
 
 
-def test_build_default_policies_returns_all_seven() -> None:
-    policies = build_default_policies()
+def test_build_default_policies_returns_all_eight() -> None:
+    policies = build_default_policies(approved_dependencies=("fastapi",))
     ids = {policy.policy_id for policy in policies}
     assert ids == {
         "workspace_confinement",
@@ -27,6 +27,7 @@ def test_build_default_policies_returns_all_seven() -> None:
         "secret_scan",
         "schema_change_control",
         "diff_size_limit",
+        "dependency_control",
     }
 
 

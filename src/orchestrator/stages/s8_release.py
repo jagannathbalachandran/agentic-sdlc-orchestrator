@@ -7,6 +7,12 @@ still running.
 Release approval is unconditional (C7: "Release (always)") — wired directly.
 The push itself (after approval) isn't part of the stage graph's own pending-
 stage loop; it's a separate action once the run reaches `completed`.
+
+Owner "Orchestrator + human": `requires_agent=False` — no agent call.
+`report.md`/`pr-description.md` are generated here (engine/fsm.py's S8
+commit hook) so the human has them to read *before* deciding on Release
+approval, matching requirements.md's own S8 row ("Checklist, report.md,
+pr-description.md (-> record)").
 """
 
 from __future__ import annotations
@@ -20,4 +26,5 @@ SPEC = StageSpec(
     depends_on=(StageId.S7A_DOCS, StageId.S7B_REVIEW),
     commit_strategy=CommitStrategy.NONE,
     checkpoint_after=ApprovalCheckpointKind.RELEASE,
+    requires_agent=False,
 )

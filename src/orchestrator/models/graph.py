@@ -51,7 +51,18 @@ class CommitStrategy(StrEnum):
 
 
 class StageSpec(BaseModel):
-    """Declarative descriptor for one stage in the fixed Phase 1 graph."""
+    """Declarative descriptor for one stage in the fixed Phase 1 graph.
+
+    `requires_agent` (default `True`) is distinct from `owner_profile` being
+    set: S0/S6/S8 are orchestrator-only (workspace prep / gates + policies /
+    release checkpoint) and must never reach the executor at all — under the
+    real executor, an empty `profile_name` would try to load a profile file
+    that doesn't exist. `owner_profile is None` alone can't carry this
+    signal: test stub graphs already use a bare `StageSpec(stage_id=...)`
+    (`owner_profile` defaulting to `None`) as a *generic, still
+    executor-backed* stand-in stage, so branching on `owner_profile` would
+    silently change their meaning too.
+    """
 
     stage_id: StageId
     owner_profile: str | None = None
@@ -59,6 +70,7 @@ class StageSpec(BaseModel):
     allowed_write_paths: tuple[str, ...] = ()
     commit_strategy: CommitStrategy = CommitStrategy.NONE
     checkpoint_after: ApprovalCheckpointKind | None = None
+    requires_agent: bool = True
 
 
 class GateOutcome(BaseModel):
@@ -101,3 +113,8 @@ class GraphState(BaseModel):
     inject_fault: bool = False
     fault_injected: bool = False
     clarification_answer: str | None = None
+    target_repo_url: str | None = None
+    base_ref: str | None = None
+    requirement_text: str = ""
+    req_id: str = ""
+    template_path: str | None = None

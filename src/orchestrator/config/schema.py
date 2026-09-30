@@ -16,6 +16,7 @@ class Limits(BaseModel):
     max_run_duration_minutes: int = Field(gt=0)
     max_agent_calls: int = Field(gt=0)
     per_call_timeout_seconds: int = Field(gt=0)
+    max_call_budget_usd: float = Field(gt=0)
     diff_size_limit_lines: int = Field(gt=0)
     diff_size_limit_files: int = Field(gt=0)
 

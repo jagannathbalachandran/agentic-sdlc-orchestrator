@@ -33,6 +33,12 @@ from orchestrator.workspace.git_ops import commit_all
 Clock = Callable[[], datetime]
 CommitHook = Callable[[StageContext, StageSpec], "str | None"]
 
+NO_AGENT_RESPONSE = AgentCallResponse(
+    outcome=AgentCallOutcome.SUCCESS,
+    summary="orchestrator-only stage; no agent call",
+    duration_seconds=0.0,
+)
+
 
 def no_op_commit(_context: StageContext, _spec: StageSpec) -> str | None:
     """A commit hook that never commits — used by tests that don't touch git."""
@@ -156,17 +162,21 @@ class StageRunner:
         self._record(context, EventType.STAGE_STARTED)
         self._run_gates(self._gates.entry, context)
 
-        response = self._executor.execute(
-            AgentCallRequest(
-                profile_name=request.spec.owner_profile or "",
-                scenario_id=request.scenario_id,
-                stage=request.spec.stage_id.value,
-                attempt=request.attempt,
-                rendered_prompt=request.rendered_prompt,
-                workspace_path=str(request.workspace_path),
-                timeout_seconds=request.timeout_seconds,
-                budget_usd=request.budget_usd,
+        response = (
+            self._executor.execute(
+                AgentCallRequest(
+                    profile_name=request.spec.owner_profile or "",
+                    scenario_id=request.scenario_id,
+                    stage=request.spec.stage_id.value,
+                    attempt=request.attempt,
+                    rendered_prompt=request.rendered_prompt,
+                    workspace_path=str(request.workspace_path),
+                    timeout_seconds=request.timeout_seconds,
+                    budget_usd=request.budget_usd,
+                )
             )
+            if request.spec.requires_agent
+            else NO_AGENT_RESPONSE
         )
 
         self._run_gates(self._gates.exit, context)

@@ -11,6 +11,7 @@ from pathlib import Path
 from orchestrator.config.loader import load_defaults_config
 from orchestrator.engine.graph import GRAPH
 from orchestrator.policies.base import Policy
+from orchestrator.policies.dependency_control import DependencyControlPolicy
 from orchestrator.policies.diff_size_limit import DiffSizeLimitPolicy
 from orchestrator.policies.main_protection import MainProtectionPolicy
 from orchestrator.policies.path_partitioning import PathPartitioningPolicy
@@ -36,11 +37,16 @@ def _allowed_path_globs_union() -> tuple[str, ...]:
     return tuple(globs)
 
 
-def build_default_policies() -> tuple[Policy, ...]:
-    """The real 7 policies (dependency control descoped this slice), configured
-    from `config/defaults.toml` (resolved relative to the current working
-    directory, matching `cli/commands/_common.py`'s existing convention — the
-    orchestrator CLI is always run from its own repo root).
+def build_default_policies(
+    approved_dependencies: tuple[str, ...] = (),
+) -> tuple[Policy, ...]:
+    """The real 8 C6 policies, configured from `config/defaults.toml`
+    (resolved relative to the current working directory, matching
+    `cli/commands/_common.py`'s existing convention — the orchestrator CLI is
+    always run from its own repo root). `approved_dependencies` is the one
+    per-target input (from the target's own `.orchestrator/project.toml`,
+    T5.2) — the CLI layer reads it and passes it through; `drive()` and this
+    function both stay otherwise target-agnostic.
     """
     defaults = load_defaults_config(DEFAULTS_CONFIG_PATH)
     policy_config = defaults.policy
@@ -55,4 +61,5 @@ def build_default_policies() -> tuple[Policy, ...]:
             max_lines=defaults.limits.diff_size_limit_lines,
             max_files=defaults.limits.diff_size_limit_files,
         ),
+        DependencyControlPolicy(approved_dependencies),
     )

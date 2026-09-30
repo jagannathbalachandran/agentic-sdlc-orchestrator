@@ -7,6 +7,10 @@ still running.
 Change-control approval is conditional on a risky change (migration / new
 dependency / protected path / large diff) — that detection needs the diff-size
 and dependency-control policies (T6.2), so no checkpoint is wired here yet.
+
+Owner "Orchestrator": gate + policy results only, no agent call
+(`requires_agent=False`) — the real verification (tests pass, coverage >=
+threshold) is `gates.command_gate.TestCoverageGate`, wired as S6's exit gate.
 """
 
 from __future__ import annotations
@@ -18,4 +22,5 @@ SPEC = StageSpec(
     owner_profile=None,
     depends_on=(StageId.S5A_IMPLEMENT, StageId.S5B_ACCEPTANCE_TESTS),
     commit_strategy=CommitStrategy.NONE,
+    requires_agent=False,
 )

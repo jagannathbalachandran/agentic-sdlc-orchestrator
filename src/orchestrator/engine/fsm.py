@@ -13,13 +13,32 @@ reject-without-`--final`/answer) re-entering `drive()` to continue — they take
 just a `RunRef` (no `scenario_id`), since by the time a checkpoint exists the
 run's `scenario_id` is already persisted in graph.json.
 
-Real run.json creation (C1-AC2's "record") is still deferred — it needs registry
-lookups, config-hash computation, and real workspace/branch data not all wired
-together yet.
+Real run.json creation (C1-AC2's "record") lives in the CLI layer
+(`cli/commands/_common.py`), not here — it needs registry lookups the core
+engine must stay independent of (CLAUDE.md: "core engine must not depend on
+how agents are executed", and registry lookups are the same kind of
+CLI-only concern).
+
+**Known, documented gap (found wiring this):** requirements.md §11's own
+directory picture nests every deliverable under `docs/requirements/<REQ-id>-
+<slug>/` (`00-source.md`, `01-requirements.md`, ... `traceability.md` all
+live there, one folder per requirement). Every piece of code that reads or
+writes these files — `gates/traceability_gate.py`, `audit/traceability.py`,
+every stage's mock fixtures, every agent profile's `output_contract` — was
+already built against **flat, workspace-root filenames** instead, before
+this task existed. Renaming that convention now would touch dozens of
+already-tested files for a concern orthogonal to "wire the real executor";
+this task keeps the flat convention everywhere (including the new
+`00-source.md` writer below) rather than fixing half of it inconsistently.
+Flagged in `docs/build-notes.md`'s integration-audit table, not silently
+papered over.
 """
 
 from __future__ import annotations
 
+import shutil
+import subprocess
+import sys
 from dataclasses import dataclass, field
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -27,12 +46,21 @@ from pathlib import Path
 from orchestrator.audit.approvals_log import append_approval
 from orchestrator.audit.decisions_log import append_decision, next_decision_id
 from orchestrator.audit.event_log import EventLog
+from orchestrator.audit.metrics import compute_metrics, metrics_to_model
+from orchestrator.audit.pr_description import generate_pr_description
+from orchestrator.audit.report import generate_report
 from orchestrator.audit.run_record import atomic_write_json, read_json
+from orchestrator.audit.traceability import (
+    CommitInfo,
+    TraceabilityInputs,
+    generate_traceability_report,
+)
 from orchestrator.config.schema import RetryLimits
 from orchestrator.engine.graph import GRAPH
 from orchestrator.engine.locking import acquire_lock, release_lock
 from orchestrator.engine.replanning import invalidate_from
 from orchestrator.engine.runner import (
+    CommitHook,
     CommitTrailerContext,
     StageGates,
     StageRunner,
@@ -49,7 +77,8 @@ from orchestrator.exceptions import (
     RunAlreadyTerminalError,
 )
 from orchestrator.executors.base import Executor
-from orchestrator.gates.base import Gate
+from orchestrator.gates.base import Gate, StageContext
+from orchestrator.gates.command_gate import TestCoverageGate
 from orchestrator.gates.existence_gate import ExistenceGate
 from orchestrator.gates.schema_gate import SchemaGate
 from orchestrator.gates.traceability_gate import (
@@ -75,19 +104,29 @@ from orchestrator.models.graph import (
 from orchestrator.models.run import RunState
 from orchestrator.policies.base import Policy, PolicyOutcome, compute_diff
 from orchestrator.workspace.git_ops import (
+    clone_repo,
     commit_all,
     current_commit_or_empty_tree,
     ensure_on_branch,
     init_repo,
     rollback_to,
+    run_git,
 )
 
 GRAPH_STATE_FILENAME = "graph.json"
 EVENTS_FILENAME = "events.jsonl"
 APPROVALS_FILENAME = "approvals.jsonl"
 DECISIONS_FILENAME = "decisions.jsonl"
+METRICS_FILENAME = "metrics.json"
+REPORT_FILENAME = "report.md"
+PR_DESCRIPTION_FILENAME = "pr-description.md"
+TRACEABILITY_FILENAME = "traceability.md"
+SOURCE_BASELINE_FILENAME = "00-source.md"
 DEFAULT_STAGE_TIMEOUT_SECONDS = 600
 DEFAULT_STAGE_BUDGET_USD = 0.5
+DEFAULT_TEMPLATE_PATH = Path("templates/python-service")
+VENV_CREATE_TIMEOUT_SECONDS = 120
+PIP_INSTALL_TIMEOUT_SECONDS = 600
 RUN_BRANCH_PREFIX = "run/"
 DEFAULT_RETRY_LIMITS = RetryLimits(
     invalid_output_max_attempts=2,
@@ -99,10 +138,17 @@ DEFAULT_MAX_AGENT_CALLS = 60
 
 @dataclass(frozen=True)
 class ReliabilityLimits:
-    """The bounded-retry and safe-stop numbers `drive()` enforces (T7.1)."""
+    """The bounded-retry, safe-stop, and per-call numbers `drive()` enforces
+    (T7.1; `per_call_timeout_seconds`/`budget_usd` added when config-driven
+    limits were wired in ahead of T10 — previously hardcoded module
+    constants, now `config/defaults.toml`'s own `limits.per_call_timeout_
+    seconds`/`limits.max_call_budget_usd` via `cli/commands/_common.py`).
+    """
 
     retry_limits: RetryLimits = field(default_factory=lambda: DEFAULT_RETRY_LIMITS)
     max_agent_calls: int = DEFAULT_MAX_AGENT_CALLS
+    per_call_timeout_seconds: int = DEFAULT_STAGE_TIMEOUT_SECONDS
+    budget_usd: float = DEFAULT_STAGE_BUDGET_USD
 
 
 DEFAULT_RELIABILITY_LIMITS = ReliabilityLimits()
@@ -121,10 +167,22 @@ class RunRef:
 class DriveRequest:
     """Which run to advance, and (for a brand-new run) its scenario_id.
 
-    `inject_fault` (G-16) only matters the first time a run's GraphState is
-    created — it's copied onto `GraphState.inject_fault` there and persists
-    from then on, so `approve`/`reject`/`answer` re-entering `drive()` for an
-    existing run don't need to (and can't easily) re-supply it.
+    `inject_fault`, `target_repo_url`, `base_ref`, `requirement_text`,
+    `req_id` and `template_path` only matter the first time a run's
+    GraphState is created — each is copied onto the matching `GraphState`
+    field there and persists from then on, so `approve`/`reject`/`answer`
+    re-entering `drive()` for an existing run don't need to (and can't
+    easily) re-supply them. Resolving `target_repo_url` (the registry
+    lookup) and `requirement_text`/`req_id`/`base_ref` (the scenario config)
+    is the CLI layer's job (`cli/commands/_common.py`) — `drive()` itself
+    never touches the registry or scenario config files, only what's already
+    been resolved into this request.
+
+    `target_repo_url is None` means no real target is configured (the stub/
+    test-graph case) — S0's commit hook then just adds `00-source.md` to
+    whatever bare repo `drive()`'s preamble already set up, instead of
+    cloning/copying a real workspace. `base_ref is None` (with a real
+    target) means greenfield: copy `template_path` instead of cloning.
     """
 
     orch_home: Path
@@ -132,6 +190,11 @@ class DriveRequest:
     run_id: str
     scenario_id: str
     inject_fault: bool = False
+    target_repo_url: str | None = None
+    base_ref: str | None = None
+    requirement_text: str = ""
+    req_id: str = ""
+    template_path: str | None = None
 
     @property
     def ref(self) -> RunRef:
@@ -186,11 +249,15 @@ def _traceability_gate_for(stage_id: StageId) -> Gate | None:
 def _gates_for(stage_id: StageId) -> StageGates:
     """Every stage gets the stub SchemaGate; S2 also gets the stub
     ExistenceGate on exit ("every referenced file/symbol exists", §7's S2
-    exit-gate row); S1/S3/S4 get their real citation gate (T8.1, C10-AC1).
+    exit-gate row); S1/S3/S4 get their real citation gate (T8.1, C10-AC1);
+    S6 gets the real command gate (D-11/AC5: tests pass, coverage >=
+    threshold — `gates/command_gate.py`).
     """
     exit_gates: tuple[Gate, ...] = (SchemaGate(),)
     if stage_id is StageId.S2_CODEBASE_ANALYSIS:
         exit_gates = (*exit_gates, ExistenceGate())
+    if stage_id is StageId.S6_VERIFY:
+        exit_gates = (*exit_gates, TestCoverageGate())
     traceability_gate = _traceability_gate_for(stage_id)
     if traceability_gate is not None:
         exit_gates = (*exit_gates, traceability_gate)
@@ -235,14 +302,73 @@ def _record_run_terminal(
     )
 
 
-def _complete_and_record(
-    graph_state: GraphState, event_log: EventLog, run_id: str
+def _write_metrics_json(ref: RunRef, event_log: EventLog) -> None:
+    """metrics.json, computed from this run's own events only (C13-AC1) —
+    written at every terminal transition, whatever the outcome. STOPPED/
+    FAILED already have their own `stop` event by the time this runs;
+    COMPLETED/REJECTED get `_record_run_terminal`'s `run_terminal` event
+    first, so either way this reads the full, final event list.
+    """
+    metrics = compute_metrics(event_log.read_all())
+    directory = run_dir(ref.orch_home, ref.project, ref.run_id)
+    atomic_write_json(directory / METRICS_FILENAME, metrics_to_model(metrics))
+
+
+def _write_traceability(ref: RunRef, graph_state: GraphState) -> None:
+    """traceability.md (C10-AC3), written into the workspace once a run
+    reaches COMPLETED — any other outcome would mostly just report gaps
+    against an unfinished chain, not the FR->...->test table it's meant to
+    show, so only COMPLETED gets one.
+    """
+    workspace = workspace_dir(ref.orch_home, ref.project, ref.run_id)
+
+    def _read(name: str) -> str:
+        path = workspace / name
+        return path.read_text(encoding="utf-8") if path.is_file() else ""
+
+    acceptance_dir = workspace / "tests" / "acceptance"
+    acceptance_test_files = (
+        {
+            str(path.relative_to(workspace)): path.read_text(encoding="utf-8")
+            for path in sorted(acceptance_dir.rglob("*.py"))
+        }
+        if acceptance_dir.is_dir()
+        else {}
+    )
+    commits = tuple(
+        CommitInfo(sha=sha)
+        for result in graph_state.stages.values()
+        for sha in result.commits
+    )
+    report = generate_traceability_report(
+        TraceabilityInputs(
+            requirements_md=_read("01-requirements.md"),
+            design_md=_read("02-design.md"),
+            plan_md=_read("03-plan.md"),
+            commits=commits,
+            acceptance_test_files=acceptance_test_files,
+        )
+    )
+    (workspace / TRACEABILITY_FILENAME).write_text(report, encoding="utf-8")
+
+
+def _finalize_completed_run(
+    ref: RunRef, graph_state: GraphState, event_log: EventLog
 ) -> None:
-    """`_complete_if_all_stages_passed`, plus recording the transition."""
+    _record_run_terminal(event_log, ref.run_id, RunState.COMPLETED)
+    _write_metrics_json(ref, event_log)
+    _write_traceability(ref, graph_state)
+
+
+def _complete_and_record(
+    graph_state: GraphState, event_log: EventLog, ref: RunRef
+) -> None:
+    """`_complete_if_all_stages_passed`, plus recording the transition and
+    writing this run's terminal artifacts (metrics.json, traceability.md)."""
     was_incomplete = graph_state.terminal_state is None
     _complete_if_all_stages_passed(graph_state)
     if was_incomplete and graph_state.terminal_state is RunState.COMPLETED:
-        _record_run_terminal(event_log, run_id, RunState.COMPLETED)
+        _finalize_completed_run(ref, graph_state, event_log)
 
 
 def _next_ready_batch(graph_state: GraphState) -> tuple[StageSpec, ...]:
@@ -279,6 +405,11 @@ def _load_or_init_graph_state(request: DriveRequest) -> GraphState:
         run_id=request.run_id,
         scenario_id=request.scenario_id,
         inject_fault=request.inject_fault,
+        target_repo_url=request.target_repo_url,
+        base_ref=request.base_ref,
+        requirement_text=request.requirement_text,
+        req_id=request.req_id,
+        template_path=request.template_path,
     )
 
 
@@ -296,28 +427,185 @@ class _LoopResources:
     event_log: EventLog
     workspace: Path
     max_run_duration_seconds: float
+    reliability: ReliabilityLimits = DEFAULT_RELIABILITY_LIMITS
 
 
-def _build_runner(resources: _LoopResources, spec: StageSpec) -> StageRunner:
+def _build_runner(
+    resources: _LoopResources, graph_state: GraphState, spec: StageSpec
+) -> StageRunner:
     return StageRunner(
         executor=resources.executor,
         event_log=resources.event_log,
         clock=lambda: datetime.now(UTC),
         gates=_gates_for(spec.stage_id),
-        commit_hook=stage_commit_hook,
+        commit_hook=_commit_hook_for(spec.stage_id, resources, graph_state),
     )
 
 
+def _commit_hook_for(
+    stage_id: StageId, resources: _LoopResources, graph_state: GraphState
+) -> CommitHook:
+    """S0/S8 need the orchestrator's own real work (workspace prep + `00-
+    source.md`; report.md/pr-description.md generation) done at the point
+    their commit hook fires — every other stage keeps the generic one-
+    commit-per-stage hook (T6.1)."""
+    if stage_id is StageId.S0_PREPARE:
+        return _s0_commit_hook(resources, graph_state)
+    if stage_id is StageId.S8_RELEASE:
+        return _s8_commit_hook(resources, graph_state)
+    return stage_commit_hook
+
+
+def _prepare_real_workspace(
+    workspace: Path,
+    target_repo_url: str,
+    base_ref: str | None,
+    template_path: str | None,
+) -> None:
+    """Copy the greenfield template, or clone the target at `base_ref`, into
+    `workspace` (still empty at this point — see `drive()`'s preamble) —
+    D-5/D-21's real S0 prepare logic (workspace/manager.py's own functions
+    aren't reused here: they each make their own commit immediately, which
+    would leave two commits for S0 instead of the one `CommitStrategy.ONE`
+    promises; `00-source.md` needs to land in that same single commit).
+    """
+    if base_ref is None:
+        template = Path(template_path or str(DEFAULT_TEMPLATE_PATH))
+        shutil.copytree(template, workspace, dirs_exist_ok=True)
+        init_repo(workspace)
+        run_git(workspace, "remote", "add", "origin", target_repo_url)
+    else:
+        clone_repo(Path(target_repo_url), workspace, base_ref)
+
+
+def _create_workspace_venv(workspace: Path) -> None:
+    """`python -m venv .venv` + `pip install -e ".[dev]"` — S5a/S5b's real
+    `Bash(python -m pytest *)` calls and S6's real command gate both need a
+    real venv with the workspace's own dev dependencies installed (C3-AC3;
+    T5.1's build notes flagged this as "deferred... needed at T10" — this is
+    that). Best-effort: only runs when the workspace declares a `[project.
+    optional-dependencies] dev` group at all (`pyproject.toml` present);
+    skipped otherwise rather than failing S0 outright for a workspace with
+    no such convention.
+    """
+    if not (workspace / "pyproject.toml").is_file():
+        return
+    venv_dir = workspace / ".venv"
+    subprocess.run(  # noqa: S603
+        [sys.executable, "-m", "venv", str(venv_dir)],
+        cwd=str(workspace),
+        check=True,
+        timeout=VENV_CREATE_TIMEOUT_SECONDS,
+        capture_output=True,
+    )
+    bin_dir = venv_dir / ("Scripts" if sys.platform == "win32" else "bin")
+    python = bin_dir / ("python.exe" if sys.platform == "win32" else "python")
+    subprocess.run(  # noqa: S603
+        [str(python), "-m", "pip", "install", "-e", ".[dev]"],
+        cwd=str(workspace),
+        check=True,
+        timeout=PIP_INSTALL_TIMEOUT_SECONDS,
+        capture_output=True,
+    )
+
+
+def _s0_commit_hook(resources: _LoopResources, graph_state: GraphState) -> CommitHook:
+    def hook(_context: StageContext, spec: StageSpec) -> str | None:
+        workspace = resources.workspace
+        target_repo_url = graph_state.target_repo_url
+        if target_repo_url is not None:
+            _prepare_real_workspace(
+                workspace,
+                target_repo_url,
+                graph_state.base_ref,
+                graph_state.template_path,
+            )
+            ensure_on_branch(workspace, f"{RUN_BRANCH_PREFIX}{resources.ref.run_id}")
+            _create_workspace_venv(workspace)
+        (workspace / SOURCE_BASELINE_FILENAME).write_text(
+            (graph_state.requirement_text or "") + "\n", encoding="utf-8"
+        )
+        message = commit_message_with_trailers(
+            "S0: workspace prepared",
+            CommitTrailerContext(
+                run_id=resources.ref.run_id, stage_label=spec.stage_id.value
+            ),
+        )
+        return commit_all(workspace, message)
+
+    return hook
+
+
+def _s8_commit_hook(resources: _LoopResources, graph_state: GraphState) -> CommitHook:
+    def hook(_context: StageContext, _spec: StageSpec) -> str | None:
+        directory = run_dir(
+            resources.ref.orch_home, resources.ref.project, resources.ref.run_id
+        )
+        metrics = compute_metrics(resources.event_log.read_all())
+        (directory / REPORT_FILENAME).write_text(
+            generate_report(graph_state, metrics), encoding="utf-8"
+        )
+        (directory / PR_DESCRIPTION_FILENAME).write_text(
+            generate_pr_description(graph_state, run_record_location=str(directory)),
+            encoding="utf-8",
+        )
+        return None  # S8's commit_strategy is NONE: nothing to commit in the workspace
+
+    return hook
+
+
+# Stage-specific task instructions (what to do *this call*), on top of the
+# profile's own role/format rules (agents/profiles/*.toml) — the profile
+# says how a role writes 01-requirements.md/etc.; this says which files to
+# read as input and what today's actual ask is. S0/S6/S8 need none of this
+# (requires_agent=False, orchestrator-only).
+_STAGE_TASKS: dict[StageId, str] = {
+    StageId.S2_CODEBASE_ANALYSIS: (
+        "Analyze the existing codebase already checked out in this workspace "
+        "and write 02-impact-analysis.md per your S2 responsibilities."
+    ),
+    StageId.S3_DESIGN: (
+        "Read 01-requirements.md (and 02-impact-analysis.md, if present) and "
+        "write 02-design.md."
+    ),
+    StageId.S4_PLAN: "Read 01-requirements.md and 02-design.md and write 03-plan.md.",
+    StageId.S5A_IMPLEMENT: (
+        "Read 03-plan.md. Implement every task listed there in this single "
+        "call, plus unit tests for each (per-task looping isn't wired into "
+        "the orchestrator yet, so this call covers the whole plan, not one "
+        "task)."
+    ),
+    StageId.S5B_ACCEPTANCE_TESTS: (
+        "Read 03-plan.md's acceptance criteria and 02-design.md's contracts "
+        "(not src/) and write the acceptance tests."
+    ),
+    StageId.S7A_DOCS: (
+        "Read 03-plan.md and the changes under src/ from this run, and "
+        "document every changed API surface."
+    ),
+    StageId.S7B_REVIEW: (
+        "Review the changes under src/ and tests/ from this run against "
+        "02-design.md and 03-plan.md; write the findings report."
+    ),
+}
+
+
 def _rendered_prompt_for(spec: StageSpec, graph_state: GraphState) -> str:
-    prompt = f"stage {spec.stage_id.value}"
-    if spec.stage_id is StageId.S1_REQUIREMENTS and graph_state.clarification_answer:
-        # T7.4: S1 re-running after a Clarification answer gets that answer as
-        # additional context — the minimum viable form of "available to the
-        # analyst profile", matching how every other stage's prompt is still
-        # just this placeholder (real profile-rendered prompts aren't wired
-        # into engine/fsm.py at all yet, Phase 1 scope).
-        prompt += f"\n\nHuman answer to blocking questions: {graph_state.clarification_answer}"
-    return prompt
+    if spec.stage_id is StageId.S1_REQUIREMENTS:
+        prompt = (
+            f"Requirement {graph_state.req_id}: {graph_text}"
+            if (graph_text := graph_state.requirement_text)
+            else f"Requirement {graph_state.req_id}"
+        )
+        if graph_state.clarification_answer:
+            # T7.4: S1 re-running after a Clarification answer gets that
+            # answer as additional context.
+            prompt += (
+                f"\n\nHuman answer to blocking questions: "
+                f"{graph_state.clarification_answer}"
+            )
+        return prompt
+    return _STAGE_TASKS.get(spec.stage_id, f"stage {spec.stage_id.value}")
 
 
 def _build_request(
@@ -337,8 +625,8 @@ def _build_request(
         scenario_id=graph_state.scenario_id,
         workspace_path=resources.workspace,
         rendered_prompt=_rendered_prompt_for(spec, graph_state),
-        timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
-        budget_usd=DEFAULT_STAGE_BUDGET_USD,
+        timeout_seconds=resources.reliability.per_call_timeout_seconds,
+        budget_usd=resources.reliability.budget_usd,
         attempt=next_attempt,
     )
 
@@ -388,6 +676,7 @@ def _evaluate_s6_policies(
                 payload={"reason": "critical policy violation"},
             )
         )
+        _write_metrics_json(resources.ref, resources.event_log)
         return True
     if any(result.outcome is PolicyOutcome.CHANGE_CONTROL for result in results):
         graph_state.pending_checkpoint = ApprovalCheckpointKind.CHANGE_CONTROL
@@ -440,6 +729,7 @@ def _fallback_to_human(
             payload={"reason": reason, "attempts": attempts},
         )
     )
+    _write_metrics_json(resources.ref, resources.event_log)
 
 
 def _run_fix_call(
@@ -623,9 +913,11 @@ def _record_batch_result(
     )
     if should_inject:
         _inject_fault(resources, graph_state, attempts)
-        # No real "run the target's test suite" mechanism exists yet (Phase 1
-        # scope) for the injected test to actually fail against — this is the
-        # deterministic stand-in until that real integration lands.
+        # Forced to FAILED directly, deterministically, rather than relying
+        # on the real command gate (gates/command_gate.py) to actually catch
+        # the injected failing test — a real target's own scripts/check.py
+        # *would* now fail on it too, but forcing this outcome keeps G-16's
+        # demo independent of whether a given workspace has a working venv.
         result = StageRunResult(
             status=StageStatus.FAILED, response=result.response, commit=None
         )
@@ -641,6 +933,13 @@ def _record_batch_result(
         graph_state.last_checkpoint_commit = current_commit_or_empty_tree(
             resources.workspace
         )
+        if spec.stage_id is StageId.S0_PREPARE and graph_state.base_commit is None:
+            # Captured once S0 actually finishes (not in drive()'s preamble
+            # any more — a real target's workspace doesn't have its base
+            # commit until S0's own commit hook clones/copies it in), so
+            # every S6 policy check diffs the run's own changes, never the
+            # target repo's entire history.
+            graph_state.base_commit = graph_state.last_checkpoint_commit
 
     is_s7b_findings = (
         spec.stage_id is StageId.S7B_REVIEW
@@ -675,7 +974,7 @@ def _record_batch_result(
         _handle_stage_failure(resources, graph_state, spec, attempts, retry_limits)
     elif spec.stage_id is StageId.S6_VERIFY:
         if not _evaluate_s6_policies(resources, graph_state, policies):
-            _complete_and_record(graph_state, resources.event_log, resources.ref.run_id)
+            _complete_and_record(graph_state, resources.event_log, resources.ref)
     elif spec.checkpoint_after is not None:
         graph_state.pending_checkpoint = spec.checkpoint_after
         resources.event_log.append(
@@ -688,7 +987,7 @@ def _record_batch_result(
             )
         )
     else:
-        _complete_and_record(graph_state, resources.event_log, resources.ref.run_id)
+        _complete_and_record(graph_state, resources.event_log, resources.ref)
 
 
 def _check_safe_stop_limits(
@@ -756,20 +1055,35 @@ def drive(
     try:
         graph_state = _load_or_init_graph_state(request)
         workspace = workspace_dir(ref.orch_home, ref.project, ref.run_id)
-        # Real clone/template-copy is S0's still-deferred real prepare logic;
-        # this just guarantees the minimum a commit-bearing stage needs — a
-        # directory that's already a git repo (idempotent: a no-op if S0's real
-        # logic already set one up here first).
-        init_repo(workspace)
-        # D-5: create/switch to the run branch before any stage executes, so
-        # the run is never left on main — main_protection's policy check would
-        # otherwise (correctly) flag every run, since nothing else does this
-        # yet (S0's real prepare logic is the eventual real owner).
-        ensure_on_branch(workspace, f"{RUN_BRANCH_PREFIX}{ref.run_id}")
-        if graph_state.base_commit is None:
-            # Captured once, at the run's very first drive() call, so every S6
-            # policy check diffs the whole run's own changes, not the target
-            # repo's entire history.
+        workspace.mkdir(parents=True, exist_ok=True)
+        workspace_has_git = (workspace / ".git").exists()
+        if not workspace_has_git and graph_state.target_repo_url is None:
+            # No real target configured (stub/test graphs) — bare fallback so
+            # any commit-bearing stage still has *a* repo to work with. With a
+            # real target, S0's own commit hook does the real clone/template-
+            # copy instead — it needs `workspace` to still be empty (git clone
+            # refuses a non-empty destination), so this must NOT run first.
+            init_repo(workspace)
+            workspace_has_git = True
+        if workspace_has_git:
+            # D-5: create/switch to the run branch before any stage executes,
+            # so the run is never left on main. Skipped on a real target's
+            # very first call — nothing to switch branches on until S0's own
+            # commit hook (below, inside the loop) has cloned/copied in.
+            ensure_on_branch(workspace, f"{RUN_BRANCH_PREFIX}{ref.run_id}")
+        s0_spec = GRAPH.get(StageId.S0_PREPARE)
+        s0_is_orchestrator_only = s0_spec is not None and not s0_spec.requires_agent
+        if not s0_is_orchestrator_only and graph_state.base_commit is None:
+            # The real S0 (requires_agent=False) writes 00-source.md (and, for
+            # a real target, clones/copies the whole workspace) as pure
+            # infrastructure, not diffable agent work — base_commit is
+            # captured the other way for it, after it finishes
+            # (_record_batch_result, once it PASSES). A *stub* graph's S0 (any
+            # test not reusing the real spec, requires_agent defaulting True)
+            # is a normal, executor-backed stage instead, so its own commit
+            # must stay *inside* the diffable range — captured here, before
+            # it runs, same as the bare repo's current state (empty tree, the
+            # first time).
             graph_state.base_commit = current_commit_or_empty_tree(workspace)
         if graph_state.started_at is None:
             graph_state.started_at = datetime.now(UTC)
@@ -781,6 +1095,7 @@ def drive(
             ),
             workspace=workspace,
             max_run_duration_seconds=max_run_duration_seconds,
+            reliability=reliability,
         )
 
         ran_stages: list[StageId] = []
@@ -793,7 +1108,7 @@ def drive(
                 break
             batch_results = run_batch(
                 batch_specs,
-                build_runner=lambda spec: _build_runner(resources, spec),
+                build_runner=lambda spec: _build_runner(resources, graph_state, spec),
                 build_request=lambda spec: _build_request(resources, graph_state, spec),
             )
             for batch_result in batch_results:
@@ -869,6 +1184,7 @@ def resolve_checkpoint(
         if decision is ApprovalDecision.REJECT_FINAL:
             graph_state.terminal_state = RunState.REJECTED
             _record_run_terminal(event_log, ref.run_id, RunState.REJECTED)
+            _write_metrics_json(ref, event_log)
         elif (
             decision is ApprovalDecision.REJECT
             and checkpoint is ApprovalCheckpointKind.DESIGN
@@ -934,7 +1250,7 @@ def resolve_checkpoint(
             # pending can complete the run (D-14) — drive()'s own completion
             # check never runs for S8 since it takes the checkpoint branch, not
             # the "stage passed with no checkpoint" branch.
-            _complete_and_record(graph_state, event_log, ref.run_id)
+            _complete_and_record(graph_state, event_log, ref)
         atomic_write_json(_state_path(ref), graph_state)
         return graph_state
     finally:
@@ -963,6 +1279,7 @@ def stop_run(ref: RunRef, reason: str, max_run_duration_seconds: float) -> Graph
         graph_state.pending_checkpoint = None
         graph_state.terminal_state = RunState.STOPPED
         atomic_write_json(_state_path(ref), graph_state)
+        _write_metrics_json(ref, event_log)
         return graph_state
     finally:
         release_lock(ref.orch_home, ref.project)
