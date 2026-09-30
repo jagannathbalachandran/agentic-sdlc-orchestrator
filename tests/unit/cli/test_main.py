@@ -26,6 +26,35 @@ def test_default_orch_home_falls_back_to_home_dotdir(
     assert cli_main.default_orch_home() == Path.home() / ".orchestrator"
 
 
+def test_main_resolves_a_relative_orch_home_to_an_absolute_path(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T9.10: found in real end-to-end verification -- a relative
+    --orch-home reached S0's real venv creation (subprocess cwd=workspace
+    *and* the venv path passed as that same subprocess's own argument),
+    which resolved the relative workspace path a second time and doubled
+    it. Every handler must always receive an absolute orch_home, regardless
+    of how the flag was spelled on the command line.
+    """
+    monkeypatch.chdir(tmp_path)
+    captured: dict[str, Path] = {}
+
+    def _fake_handler(args: object, orch_home: Path) -> int:
+        del args
+        captured["orch_home"] = orch_home
+        return 0
+
+    monkeypatch.setattr(cli_main, "_handlers", lambda: {"register": _fake_handler})
+
+    exit_code = cli_main.main(
+        ["--orch-home", "relative-orch-home", "register", "demo", "url"]
+    )
+
+    assert exit_code == 0
+    assert captured["orch_home"].is_absolute()
+    assert captured["orch_home"] == tmp_path / "relative-orch-home"
+
+
 def test_main_dispatches_register_then_validate(tmp_path: Path) -> None:
     project_config = tmp_path / "project.toml"
     project_config.write_text('project_name = "demo"\n', encoding="utf-8")

@@ -597,6 +597,13 @@ def _create_workspace_venv(workspace: Path) -> None:
     """
     if not (workspace / "pyproject.toml").is_file():
         return
+    # Resolved to absolute (T9.10, found in real verification): a relative
+    # `workspace` (e.g. from a relative --orch-home) combined with `cwd=
+    # str(workspace)` below made the *argument* venv_dir get resolved a
+    # SECOND time, relative to the subprocess's own new cwd -- doubling the
+    # whole workspace path and landing venv's own ensurepip bootstrap
+    # subprocess in a nonsensical nested directory, where it failed.
+    workspace = workspace.resolve()
     venv_dir = workspace / ".venv"
     subprocess.run(  # noqa: S603
         [sys.executable, "-m", "venv", str(venv_dir)],

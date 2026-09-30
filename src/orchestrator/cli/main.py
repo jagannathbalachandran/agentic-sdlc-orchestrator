@@ -71,7 +71,15 @@ def main(argv: list[str] | None = None) -> int:
     """Parse argv and dispatch to the selected command's handler."""
     parser = build_parser()
     args = parser.parse_args(argv)
-    orch_home = Path(args.orch_home) if args.orch_home else default_orch_home()
+    # .resolve() (T9.10, found in real verification): every workspace/venv
+    # path downstream is built by joining onto orch_home, then some of those
+    # (S0's real venv creation, S6's real command gate) also run a subprocess
+    # with cwd=<that same path> while passing it as a command argument too --
+    # a relative orch_home made the argument get resolved a second time,
+    # relative to the subprocess's own new cwd, silently doubling the path.
+    orch_home = (
+        Path(args.orch_home) if args.orch_home else default_orch_home()
+    ).resolve()
 
     handler = _handlers().get(args.command)
     if handler is None:
