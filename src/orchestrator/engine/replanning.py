@@ -38,12 +38,22 @@ def _downstream_of(stage_id: StageId) -> set[StageId]:
 def invalidate_from(graph_state: GraphState, stage_id: StageId) -> tuple[StageId, ...]:
     """Mark `stage_id` and everything downstream of it `invalidated`.
 
+    `stage_id` itself keeps its existing attempt count — its re-run is a real
+    next attempt (feedback/an answer changes what it's given, so its mock
+    fixture lookup must key off a genuinely later attempt number, not replay
+    attempt 1's canned content again). Every stage strictly downstream of it
+    has never run in this branch of the re-plan, so those reset to 0.
+
     Returns the invalidated stage IDs (in `GRAPH`'s order) so the caller can
     record them on the triggering event (C11-AC2: "events record the trigger").
     """
     affected = _downstream_of(stage_id)
+    triggering_attempts = graph_state.stages.get(
+        stage_id, StageResult(stage_id=stage_id)
+    ).attempts
     for candidate_id in affected:
+        attempts = triggering_attempts if candidate_id == stage_id else 0
         graph_state.stages[candidate_id] = StageResult(
-            stage_id=candidate_id, status=StageStatus.INVALIDATED
+            stage_id=candidate_id, status=StageStatus.INVALIDATED, attempts=attempts
         )
     return tuple(stage for stage in GRAPH if stage in affected)

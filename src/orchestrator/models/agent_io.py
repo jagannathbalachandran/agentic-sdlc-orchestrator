@@ -47,7 +47,9 @@ class AgentCallResponse(BaseModel):
     `high_severity_findings` is S7b-specific (empty for every other stage) —
     the reviewer profile's own finding IDs it judged high severity, driving
     the S7b-findings bounded retry (T7.1, G-15) without needing to parse the
-    findings report file itself.
+    findings report file itself. `blocking_questions` is S1-specific in the
+    same way — the analyst profile's own questions it couldn't resolve from
+    the REQ text alone, driving the Clarification checkpoint (T7.4, C7).
     """
 
     outcome: AgentCallOutcome
@@ -55,6 +57,7 @@ class AgentCallResponse(BaseModel):
     produced_ids: tuple[str, ...] = ()
     files_written: tuple[str, ...] = ()
     high_severity_findings: tuple[str, ...] = ()
+    blocking_questions: tuple[str, ...] = ()
     duration_seconds: float
     cost_usd: float | None = None
     session_id: str | None = None

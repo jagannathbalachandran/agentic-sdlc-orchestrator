@@ -118,5 +118,34 @@ def test_execute_looks_up_the_attempt_suffixed_fixture_for_attempt_two(
     assert response.summary == "fix applied"
 
 
+def test_bare_name_fixture_is_a_fallback_for_any_attempt_not_only_the_first(
+    tmp_path: Path,
+) -> None:
+    """A re-run (T7.2 design-rejection, T7.4 Clarification-answer) preserves
+    its own attempt count rather than resetting to 1 — most scenarios don't
+    provide attempt-specific content for that later attempt, so the bare
+    `{stage}.json` must still resolve regardless of the attempt number."""
+    fixtures_root = tmp_path / "fixtures"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S3.json",
+        {
+            "summary": "designed",
+            "produced_ids": ["DD-1"],
+            "files_written": ["02-design.md"],
+            "files": {},
+        },
+    )
+
+    executor = MockExecutor(fixtures_root)
+    response = executor.execute(_request(workspace, "demo-scenario", "S3", attempt=2))
+
+    assert response.outcome is AgentCallOutcome.SUCCESS
+    assert response.produced_ids == ("DD-1",)
+
+
 def test_generic_fallback_scenario_id_constant_matches_the_fixtures_directory() -> None:
     assert (COMMITTED_FIXTURES_ROOT / GENERIC_FALLBACK_SCENARIO_ID).is_dir()

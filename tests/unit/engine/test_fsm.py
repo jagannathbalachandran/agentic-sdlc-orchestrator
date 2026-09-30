@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from orchestrator.audit.approvals_log import read_approvals
+from orchestrator.audit.decisions_log import read_decisions
 from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.engine.fsm import (
     DriveRequest,
@@ -387,7 +388,10 @@ def test_reject_design_with_feedback_reruns_s3_onward_keeping_s1_s2(
     second = drive(request, executor=executor, max_run_duration_seconds=3600)
     assert second.ran_stages == (StageId.S3_DESIGN,)
     assert second.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
-    assert second.graph_state.stages[StageId.S3_DESIGN].attempts == 1
+    # S3's own attempt count is preserved across invalidation (a re-plan is a
+    # real next attempt, not attempt 1 replayed) — its generic mock fixture
+    # still resolves via the bare-name fallback regardless of attempt number.
+    assert second.graph_state.stages[StageId.S3_DESIGN].attempts == 2
 
     resolve_checkpoint(
         request.ref, ApprovalDecision.APPROVE, "looks good now", "alice", 3600
@@ -656,6 +660,126 @@ def test_s6_critical_policy_violation_stops_the_run(
     assert result.graph_state.pending_checkpoint is None
     events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
     assert any(e["event_type"] == "stop" for e in events)
+
+
+def test_s1_blocking_questions_pause_for_clarification_then_answer_reruns_s1(
+    tmp_path: Path,
+) -> None:
+    """T7.4/C7: S1 raising blocking_questions pauses for Clarification (not
+    Design/Change-control); answer records the decision in decisions.jsonl
+    (C10-AC6) and re-runs S1 (with the answer as context) then downstream
+    proceeds normally to the next real checkpoint."""
+    fixtures_root = tmp_path / "fixtures"
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S0",
+        {
+            "summary": "prepared",
+            "produced_ids": [],
+            "files_written": ["00-source.md"],
+            "files": {"00-source.md": "req\n"},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S1",
+        {
+            "summary": "derived FR-1 but need clarification",
+            "produced_ids": ["FR-1"],
+            "files_written": ["01-requirements.md"],
+            "files": {"01-requirements.md": "# FR-1\n"},
+            "blocking_questions": ["What does 'expire' mean?"],
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S1-2",
+        {
+            "summary": "derived FR-1, clarified",
+            "produced_ids": ["FR-1"],
+            "files_written": ["01-requirements.md"],
+            "files": {"01-requirements.md": "# FR-1 (clarified)\n"},
+            "blocking_questions": [],
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S2",
+        {
+            "summary": "impact analysis",
+            "produced_ids": [],
+            "files_written": [],
+            "files": {},
+        },
+    )
+    _write_fixture(
+        fixtures_root,
+        "demo-scenario",
+        "S3",
+        {
+            "summary": "designed",
+            "produced_ids": ["DD-1"],
+            "files_written": ["02-design.md"],
+            "files": {"02-design.md": "# DD-1\n"},
+        },
+    )
+    request = DriveRequest(tmp_path, "demo", "run-1", "demo-scenario")
+    executor = MockExecutor(fixtures_root)
+
+    first = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert first.ran_stages == (StageId.S0_PREPARE, StageId.S1_REQUIREMENTS)
+    assert first.graph_state.pending_checkpoint is ApprovalCheckpointKind.CLARIFICATION
+
+    events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
+    requested = [e for e in events if e["event_type"] == "approval_requested"]
+    assert isinstance(requested[-1]["payload"], dict)
+    assert requested[-1]["payload"]["checkpoint"] == "clarification"
+    assert requested[-1]["payload"]["blocking_questions"] == [
+        "What does 'expire' mean?"
+    ]
+
+    answer_text = "It means a link stops working after 30 days."
+    answered = resolve_checkpoint(
+        request.ref, ApprovalDecision.ANSWER, answer_text, "alice", 3600
+    )
+    assert answered.pending_checkpoint is None
+    assert answered.clarification_answer == answer_text
+    assert answered.stages[StageId.S1_REQUIREMENTS].status is StageStatus.INVALIDATED
+
+    decisions = read_decisions(run_dir(tmp_path, "demo", "run-1") / "decisions.jsonl")
+    assert len(decisions) == 1
+    assert decisions[0].stage == "S1"
+    assert decisions[0].actor == "alice"
+    assert decisions[0].choice == answer_text
+
+    second = drive(request, executor=executor, max_run_duration_seconds=3600)
+    assert second.ran_stages == (
+        StageId.S1_REQUIREMENTS,
+        StageId.S2_CODEBASE_ANALYSIS,
+        StageId.S3_DESIGN,
+    )
+    assert second.graph_state.stages[StageId.S1_REQUIREMENTS].attempts == 2
+    assert second.graph_state.pending_checkpoint is ApprovalCheckpointKind.DESIGN
+
+
+def test_s1_with_no_blocking_questions_never_pauses_for_clarification(
+    tmp_path: Path,
+) -> None:
+    request = _request(tmp_path)
+    result = drive(
+        request, executor=MockExecutor(FIXTURES_ROOT), max_run_duration_seconds=3600
+    )
+    assert (
+        result.graph_state.stages[StageId.S1_REQUIREMENTS].status is StageStatus.PASSED
+    )
+    assert (
+        result.graph_state.pending_checkpoint
+        is not ApprovalCheckpointKind.CLARIFICATION
+    )
 
 
 def test_fault_injection_forces_one_s6_failure_then_a_normal_retry_passes(

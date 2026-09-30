@@ -53,6 +53,7 @@ class MockExecutor:
             produced_ids=tuple(fixture.get("produced_ids", ())),
             files_written=tuple(fixture.get("files_written", ())),
             high_severity_findings=tuple(fixture.get("high_severity_findings", ())),
+            blocking_questions=tuple(fixture.get("blocking_questions", ())),
             duration_seconds=0.0,
         )
 
@@ -68,11 +69,16 @@ class MockExecutor:
     def _candidate_paths(
         self, scenario_id: str, stage: str, attempt: int
     ) -> tuple[Path, ...]:
+        """The attempt-specific fixture first; the bare `{stage}.json` as a
+        fallback regardless of attempt — most tests/scenarios don't need
+        attempt-specific content, only the ones that provide it (e.g. a
+        bounded-retry test's second attempt) actually get different content.
+        """
         scenario_dir = self._fixtures_root / scenario_id
-        paths: tuple[Path, ...] = (scenario_dir / f"{stage}-{attempt}.json",)
-        if attempt == 1:
-            paths = (*paths, scenario_dir / f"{stage}.json")
-        return paths
+        return (
+            scenario_dir / f"{stage}-{attempt}.json",
+            scenario_dir / f"{stage}.json",
+        )
 
 
 def _materialize_files(fixture: dict[str, Any], workspace: Path) -> None:

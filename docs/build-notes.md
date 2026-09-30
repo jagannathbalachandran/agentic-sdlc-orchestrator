@@ -1115,3 +1115,72 @@ coverage.
   (none exists yet) — its presence in the workspace, and the forced `FAILED`
   status, are what stand in for "the test actually failed" in Phase 1's engine.
 
+## T7.4 — Clarification checkpoint
+
+**What changed:** `AgentCallResponse` gained `blocking_questions: tuple[str,
+...] = ()` (mirrored into `MockExecutor`/`RealExecutor`, same pattern as
+T7.1's `high_severity_findings`) — the analyst profile's own output contract
+already documented this field back in T4.2, anticipating this task.
+`audit/decisions_log.py` (new) — `append_decision`/`read_decisions`/
+`next_decision_id`, mirroring `approvals_log.py`'s exact shape, backing
+`decisions.jsonl` (C10-AC6's `Decision` model already existed, unused until
+now). `GraphState` gained `clarification_answer` (the human's answer text,
+threaded into S1's re-run prompt).
+
+`engine/fsm.py`'s `_record_batch_result` gained an `is_s1_clarification`
+check alongside T7.1's `is_s7b_findings` one: S1 passing with non-empty
+`blocking_questions` sets `pending_checkpoint = CLARIFICATION` (S1's own
+`StageSpec.checkpoint_after` stays `None` — the same dynamic-override
+reasoning as S6's Change-control, T6.2). `resolve_checkpoint` gained an
+`ApprovalDecision.ANSWER` + `CLARIFICATION` branch: stores the answer on
+`graph_state.clarification_answer`, calls `engine/replanning.invalidate_from(
+graph_state, StageId.S1_REQUIREMENTS)` (reusing T7.2's exact mechanism — S1
+and everything downstream, since nothing past S1 can be trusted until its
+questions are resolved), records a `Decision` to `decisions.jsonl` (not just
+`approvals.jsonl` — C10-AC6's literal requirement), and a `retry` event
+naming the trigger. `_build_request`'s new `_rendered_prompt_for` helper
+appends the stored answer to S1's prompt on re-run — the minimum viable form
+of "available to the analyst profile as context," matching how every other
+stage's prompt is still just a placeholder string (real profile-rendered
+prompts aren't wired into `engine/fsm.py` at all yet, unrelated to this task).
+
+**Two real bugs this task's own test caught, both now shared fixes:**
+1. `invalidate_from` (T7.2) reset the *triggering* stage's own attempt count
+   to 0, not just the genuinely-downstream stages' — meaning a re-run replayed
+   attempt 1's exact mock fixture again (the same `blocking_questions`, in
+   this task's case; the same design output in T7.2's), never able to
+   represent "this attempt is different because of the feedback/answer."
+   Fixed: the triggering stage keeps its own attempt count (so a re-run is a
+   real next attempt); only strictly-downstream stages reset to 0.
+   T7.2's own test needed a one-line update (`attempts == 2`, not `1`) since
+   this changes its observed behavior too, correctly.
+2. That fix meant a re-run's now-higher attempt number (e.g. S3's 2nd
+   attempt) needed its own mock fixture, which most scenarios' generic
+   fallback never provided (only attempt 1 got the bare-`{stage}.json`
+   fallback). Fixed in `executors/mock.py`: the bare-name fixture is now a
+   fallback for **any** attempt, not just the first — a per-attempt fixture
+   still takes priority when one exists (T7.1's retry tests, which rely on
+   attempt 2 finding *nothing* or finding an explicit `S6-2.json`, are
+   unaffected either way).
+
+**Covered:** C7 (Clarification checkpoint); C10-AC6.
+
+**Tests:** `tests/unit/engine/test_fsm.py`'s
+`test_s1_blocking_questions_pause_for_clarification_then_answer_reruns_s1` —
+S1's fixture carries `blocking_questions` -> pauses at Clarification (not
+Design) -> `answer` records the decision in `decisions.jsonl` (stage/actor/
+choice asserted) and invalidates S1 -> a further `drive()` call re-runs S1
+(attempt 2, a *different*, clean fixture) then proceeds through S2 to the
+real Design pause, proving downstream continues normally. A second test
+confirms S1 with no blocking questions never pauses. `executors/mock.py`
+gained its own direct test of the any-attempt bare-name fallback. Full gate:
+221 tests, 97.07% coverage.
+
+**Deferred / assumed:**
+- Same real-config-loading gap as T7.3's `inject_fault`: no CLI command loads
+  a scenario's real inputs from `.orchestrator/scenarios/<id>.toml` yet —
+  that's a separate, larger, pre-existing integration gap, not this task's.
+- The answer is appended to S1's prompt as plain text, not run through any
+  real prompt-templating/profile-rendering system — none exists in
+  `engine/fsm.py` yet for *any* stage, first-run or re-run alike.
+

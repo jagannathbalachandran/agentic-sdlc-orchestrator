@@ -100,3 +100,4 @@ class GraphState(BaseModel):
     agent_call_count: int = 0
     inject_fault: bool = False
     fault_injected: bool = False
+    clarification_answer: str | None = None

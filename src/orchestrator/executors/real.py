@@ -164,6 +164,7 @@ def _response_from_envelope(
         produced_ids=tuple(summary.get("produced_ids", ())),
         files_written=tuple(summary.get("files_written", ())),
         high_severity_findings=tuple(summary.get("high_severity_findings", ())),
+        blocking_questions=tuple(summary.get("blocking_questions", ())),
         duration_seconds=duration_seconds,
         cost_usd=cost_usd,
         session_id=session_id,

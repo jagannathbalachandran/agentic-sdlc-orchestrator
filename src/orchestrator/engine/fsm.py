@@ -25,6 +25,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 
 from orchestrator.audit.approvals_log import append_approval
+from orchestrator.audit.decisions_log import append_decision, next_decision_id
 from orchestrator.audit.event_log import EventLog
 from orchestrator.audit.run_record import atomic_write_json, read_json
 from orchestrator.config.schema import RetryLimits
@@ -54,6 +55,7 @@ from orchestrator.models.approvals import (
     ApprovalDecision,
     ApprovalRecord,
 )
+from orchestrator.models.decisions import Decision
 from orchestrator.models.events import EventDraft, EventType
 from orchestrator.models.graph import (
     CommitStrategy,
@@ -76,6 +78,7 @@ from orchestrator.workspace.git_ops import (
 GRAPH_STATE_FILENAME = "graph.json"
 EVENTS_FILENAME = "events.jsonl"
 APPROVALS_FILENAME = "approvals.jsonl"
+DECISIONS_FILENAME = "decisions.jsonl"
 DEFAULT_STAGE_TIMEOUT_SECONDS = 600
 DEFAULT_STAGE_BUDGET_USD = 0.5
 RUN_BRANCH_PREFIX = "run/"
@@ -255,6 +258,18 @@ def _build_runner(resources: _LoopResources, spec: StageSpec) -> StageRunner:
     )
 
 
+def _rendered_prompt_for(spec: StageSpec, graph_state: GraphState) -> str:
+    prompt = f"stage {spec.stage_id.value}"
+    if spec.stage_id is StageId.S1_REQUIREMENTS and graph_state.clarification_answer:
+        # T7.4: S1 re-running after a Clarification answer gets that answer as
+        # additional context — the minimum viable form of "available to the
+        # analyst profile", matching how every other stage's prompt is still
+        # just this placeholder (real profile-rendered prompts aren't wired
+        # into engine/fsm.py at all yet, Phase 1 scope).
+        prompt += f"\n\nHuman answer to blocking questions: {graph_state.clarification_answer}"
+    return prompt
+
+
 def _build_request(
     resources: _LoopResources, graph_state: GraphState, spec: StageSpec
 ) -> StageRunRequest:
@@ -271,7 +286,7 @@ def _build_request(
         run_id=resources.ref.run_id,
         scenario_id=graph_state.scenario_id,
         workspace_path=resources.workspace,
-        rendered_prompt=f"stage {spec.stage_id.value}",
+        rendered_prompt=_rendered_prompt_for(spec, graph_state),
         timeout_seconds=DEFAULT_STAGE_TIMEOUT_SECONDS,
         budget_usd=DEFAULT_STAGE_BUDGET_USD,
         attempt=next_attempt,
@@ -578,8 +593,30 @@ def _record_batch_result(
         and result.status is StageStatus.PASSED
         and result.response.high_severity_findings
     )
+    is_s1_clarification = (
+        spec.stage_id is StageId.S1_REQUIREMENTS
+        and result.status is StageStatus.PASSED
+        and bool(result.response.blocking_questions)
+    )
     if is_s7b_findings:
         _handle_s7b_findings(resources, graph_state, attempts, retry_limits)
+    elif is_s1_clarification:
+        # C7/T7.4: S1's own StageSpec.checkpoint_after stays None (same
+        # reasoning as S6's Change-control, T6.2) — this dynamic override sets
+        # pending_checkpoint only when S1 actually raised blocking questions.
+        graph_state.pending_checkpoint = ApprovalCheckpointKind.CLARIFICATION
+        resources.event_log.append(
+            EventDraft(
+                run_id=resources.ref.run_id,
+                event_type=EventType.APPROVAL_REQUESTED,
+                recorded_at=datetime.now(UTC),
+                stage=spec.stage_id.value,
+                payload={
+                    "checkpoint": ApprovalCheckpointKind.CLARIFICATION.value,
+                    "blocking_questions": list(result.response.blocking_questions),
+                },
+            )
+        )
     elif result.status is not StageStatus.PASSED:
         _handle_stage_failure(resources, graph_state, spec, attempts, retry_limits)
     elif spec.stage_id is StageId.S6_VERIFY:
@@ -736,9 +773,12 @@ def resolve_checkpoint(
     Raises NoPendingApprovalError if the run isn't actually paused. `reject` with
     ApprovalDecision.REJECT_FINAL ends the run as `rejected` (D-14); rejecting a
     Design checkpoint (without `--final`) triggers real re-planning (C11: S3
-    onward invalidated, S1/S2 kept — engine/replanning.py); every other
-    decision just clears the checkpoint so a later drive() call continues.
-    `comment` is faithfully recorded in every case (C7-AC2/AC3).
+    onward invalidated, S1/S2 kept — engine/replanning.py); answering a
+    Clarification checkpoint (T7.4) records the answer in decisions.jsonl
+    (C10-AC6, not just approvals.jsonl) and re-runs S1 onward with it as
+    context; every other decision just clears the checkpoint so a later
+    drive() call continues. `comment` is faithfully recorded in every case
+    (C7-AC2/AC3).
     """
     acquire_lock(ref.orch_home, ref.project, ref.run_id, max_run_duration_seconds)
     try:
@@ -791,6 +831,45 @@ def resolve_checkpoint(
                     recorded_at=now,
                     payload={
                         "trigger": "design_rejection",
+                        "invalidated": [stage.value for stage in invalidated],
+                    },
+                )
+            )
+        elif (
+            decision is ApprovalDecision.ANSWER
+            and checkpoint is ApprovalCheckpointKind.CLARIFICATION
+        ):
+            # C7/T7.4: answering blocking questions re-runs S1 (and everything
+            # downstream, since nothing past S1 can be trusted until they're
+            # resolved) with the answer as additional context — the same
+            # invalidate-and-let-drive()-re-select mechanism as Design
+            # rejection (T7.2), reused via engine/replanning.py.
+            graph_state.clarification_answer = comment
+            invalidated = invalidate_from(graph_state, StageId.S1_REQUIREMENTS)
+            decisions_path = (
+                run_dir(ref.orch_home, ref.project, ref.run_id) / DECISIONS_FILENAME
+            )
+            append_decision(
+                decisions_path,
+                Decision(
+                    decision_id=next_decision_id(decisions_path, ref.run_id),
+                    stage=StageId.S1_REQUIREMENTS.value,
+                    actor=approver,
+                    choice=comment,
+                    rationale=(
+                        "Human answer to blocking questions raised by S1 at the"
+                        " Clarification checkpoint"
+                    ),
+                    recorded_at=now,
+                ),
+            )
+            event_log.append(
+                EventDraft(
+                    run_id=ref.run_id,
+                    event_type=EventType.RETRY,
+                    recorded_at=now,
+                    payload={
+                        "trigger": "clarification_answer",
                         "invalidated": [stage.value for stage in invalidated],
                     },
                 )
