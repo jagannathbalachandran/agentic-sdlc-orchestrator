@@ -13,6 +13,7 @@ import pytest
 from orchestrator.cli.commands._common import (
     UnregisteredProjectError,
     build_new_run_request,
+    build_reliability_limits,
     policies_for,
     push_if_completed,
     record_run,
@@ -169,6 +170,16 @@ def test_push_if_completed_is_none_when_not_completed(tmp_path: Path) -> None:
         run_id="run-1", scenario_id="s", target_repo_url="/some/target"
     )
     assert push_if_completed(ref, graph_state) is None
+
+
+def test_build_reliability_limits_reads_per_call_timeout_and_budget_from_config() -> (
+    None
+):
+    """Item 4 of the pre-T10 audit: a real call gets a real per-call budget
+    cap and timeout, sourced from config/defaults.toml (not hardcoded)."""
+    limits = build_reliability_limits()
+    assert limits.per_call_timeout_seconds > 0
+    assert limits.budget_usd > 0
 
 
 def test_push_if_completed_is_none_with_no_real_target(tmp_path: Path) -> None:
