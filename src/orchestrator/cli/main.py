@@ -13,6 +13,7 @@ from orchestrator.cli.commands import (
     approve,
     register,
     reject,
+    rollback,
     run,
     stop,
     validate,
@@ -42,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Override ORCH_HOME (default: ~/.orchestrator or $ORCH_HOME)",
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
-    for module in (register, validate, run, approve, reject, answer, stop):
+    for module in (register, validate, run, approve, reject, answer, stop, rollback):
         module.add_subparser(subparsers)
     return parser
 
@@ -62,6 +63,7 @@ def _handlers() -> dict[str, CommandHandler]:
         reject.COMMAND_NAME: reject.handle,
         answer.COMMAND_NAME: answer.handle,
         stop.COMMAND_NAME: stop.handle,
+        rollback.COMMAND_NAME: rollback.handle,
     }
 
 

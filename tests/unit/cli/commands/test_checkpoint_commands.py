@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from orchestrator.cli.commands import answer, approve, reject, stop
+from orchestrator.cli.commands import answer, approve, reject, rollback, stop
 from orchestrator.engine.fsm import DriveRequest, drive
 from orchestrator.executors.mock import MockExecutor
 from orchestrator.models.approvals import ApprovalCheckpointKind
@@ -111,4 +111,13 @@ def test_stop_handle_sets_terminal_state(
         project=request.project, run_id=request.run_id, reason="safety concern"
     )
     exit_code = stop.handle(args, tmp_path)
+    assert exit_code == 0
+
+
+def test_rollback_handle_resets_to_the_last_checkpoint_commit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request = _paused_request(tmp_path, monkeypatch)
+    args = argparse.Namespace(project=request.project, run_id=request.run_id)
+    exit_code = rollback.handle(args, tmp_path)
     assert exit_code == 0
