@@ -70,6 +70,11 @@ class TestCoverageGate:
                 cwd=str(workspace_path),
                 capture_output=True,
                 text=True,
+                # scripts/check.py's own output is UTF-8 (T9.10, same fix as
+                # git_ops.py/executors/real.py) -- pytest/ruff output can
+                # contain non-ASCII characters that Windows' default cp1252
+                # decoding can't handle.
+                encoding="utf-8",
                 timeout=self.timeout_seconds,
                 check=False,
             )

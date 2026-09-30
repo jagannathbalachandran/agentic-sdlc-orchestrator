@@ -113,6 +113,12 @@ def _run_subprocess(
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        # claude -p's JSON output is UTF-8 (T9.10, found in real
+        # verification) -- without this, Windows decodes it using the
+        # console's own codepage (cp1252 in an English locale), which
+        # raises UnicodeDecodeError on the first non-ASCII character an
+        # agent's reply contains (an em dash, a smart quote, ...).
+        encoding="utf-8",
         **popen_kwargs,
     )
     try:

@@ -97,6 +97,33 @@ def test_clone_repo_checks_out_the_requested_ref(tmp_path: Path) -> None:
     assert not (dest / "CHANGELOG.md").exists()
 
 
+def test_run_git_handles_non_ascii_content_without_crashing(tmp_path: Path) -> None:
+    """T9.10: found in real end-to-end verification -- git_ops's subprocess
+    calls used `text=True` with no explicit `encoding`, so Windows decoded
+    output with the console's own codepage (cp1252 in an English locale)
+    instead of UTF-8. A real design/commit containing an em dash ("—",
+    the house style throughout this very codebase's own prompts/docs) made
+    `git diff`'s output undecodable, crashing a subprocess reader thread and
+    leaving run_git's result None instead of a string.
+    """
+    repo = tmp_path / "repo"
+    init_repo(repo)
+    (repo / "notes.md").write_text(
+        "before — an em dash and a “smart quote”\n", encoding="utf-8"
+    )
+    base = commit_all(repo, "initial notes — with an em dash")
+    (repo / "notes.md").write_text(
+        "after — changed, still non-ASCII: café\n", encoding="utf-8"
+    )
+    head = commit_all(repo, "update notes")
+
+    diff = run_git(repo, "diff", base, head, "--", "notes.md")
+
+    assert "café" in diff
+    base_subject = run_git(repo, "log", "-1", "--format=%s", base)
+    assert "em dash" in base_subject
+
+
 def test_run_git_raises_git_command_error_on_failure(tmp_path: Path) -> None:
     repo = tmp_path / "not-a-repo"
     repo.mkdir()

@@ -38,6 +38,13 @@ def _run_git_capture(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
         cwd=str(cwd),
         capture_output=True,
         text=True,
+        # git's own output is UTF-8 (T9.10, found in real verification) --
+        # without this, Windows decodes it using the console's own codepage
+        # (cp1252 in an English locale), which raises UnicodeDecodeError on
+        # the first non-ASCII byte a real commit/diff contains (an em dash,
+        # a smart quote, ...) -- crashing the reader thread and leaving
+        # `.stdout` None instead of raising a catchable error.
+        encoding="utf-8",
         timeout=GIT_COMMAND_TIMEOUT_SECONDS,
         check=False,
     )
