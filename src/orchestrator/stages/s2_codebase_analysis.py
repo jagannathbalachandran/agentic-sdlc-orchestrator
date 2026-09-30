@@ -1,8 +1,8 @@
 """S2 Codebase analysis — StageSpec binding (requirements.md §7).
 
-Always runs for now — "skipped for greenfield" (C4-AC3) needs project-type
-detection that isn't wired into the graph yet; deferred, documented in
-docs/build-notes.md.
+Skipped for greenfield, runs otherwise (C4-AC3) — decided dynamically at
+drive-time from `graph_state.base_ref is None`, not a static property of
+this spec (`engine/fsm.py:_build_runner`/`_SkippedS2Runner`).
 """
 
 from __future__ import annotations

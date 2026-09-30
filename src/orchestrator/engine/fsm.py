@@ -278,8 +278,9 @@ def _gates_for(stage_id: StageId) -> StageGates:
 
 def _all_stages_passed(graph_state: GraphState) -> bool:
     return all(
-        graph_state.stages.get(stage_id, StageResult(stage_id=stage_id)).status
-        is StageStatus.PASSED
+        _is_satisfied(
+            graph_state.stages.get(stage_id, StageResult(stage_id=stage_id)).status
+        )
         for stage_id in GRAPH
     )
 
@@ -383,8 +384,18 @@ def _complete_and_record(
         _finalize_completed_run(ref, graph_state, event_log)
 
 
+_SATISFIED_STATUSES = (StageStatus.PASSED, StageStatus.SKIPPED)
+
+
+def _is_satisfied(status: StageStatus) -> bool:
+    """C4-AC3: S2 skipped for greenfield still satisfies anything depending
+    on it ("S3 treats SKIPPED as satisfied") — SKIPPED counts alongside
+    PASSED everywhere a stage's own completion is checked."""
+    return status in _SATISFIED_STATUSES
+
+
 def _next_ready_batch(graph_state: GraphState) -> tuple[StageSpec, ...]:
-    """Every not-yet-passed stage whose dependencies are all satisfied.
+    """Every not-yet-satisfied stage whose dependencies are all satisfied.
 
     Usually one stage; two when a pair of parallel siblings (S5a+S5b, S7a+S7b)
     both become ready at once, since both depend on the same upstream stage
@@ -394,11 +405,10 @@ def _next_ready_batch(graph_state: GraphState) -> tuple[StageSpec, ...]:
     ready = []
     for stage_id, spec in GRAPH.items():
         result = graph_state.stages.get(stage_id)
-        if result is not None and result.status is StageStatus.PASSED:
+        if result is not None and _is_satisfied(result.status):
             continue
         if all(
-            graph_state.stages.get(dep, StageResult(stage_id=dep)).status
-            is StageStatus.PASSED
+            _is_satisfied(graph_state.stages.get(dep, StageResult(stage_id=dep)).status)
             for dep in spec.depends_on
         ):
             ready.append(spec)
@@ -456,6 +466,12 @@ class _LoopResources:
 def _build_runner(
     resources: _LoopResources, graph_state: GraphState, spec: StageSpec
 ) -> StageRunner:
+    if spec.stage_id is StageId.S2_CODEBASE_ANALYSIS and graph_state.base_ref is None:
+        return _SkippedS2Runner(
+            executor=resources.executor,
+            event_log=resources.event_log,
+            clock=lambda: datetime.now(UTC),
+        )
     if spec.commit_strategy is CommitStrategy.ONE_PER_TASK:
         return _PerTaskS5aRunner(
             executor=resources.executor,
@@ -484,6 +500,39 @@ def _commit_hook_for(
     if stage_id is StageId.S8_RELEASE:
         return _s8_commit_hook(resources, graph_state)
     return stage_commit_hook
+
+
+S2_SKIP_REASON = "greenfield run: no existing codebase to analyze (C4-AC3)"
+
+
+class _SkippedS2Runner(StageRunner):
+    """S2 skipped for greenfield (C4-AC3: "S2 skipped with reason for
+    greenfield; always runs otherwise"). No `base_ref` means there's no
+    existing codebase at all to analyze — `engine/fsm.py`'s own
+    `_build_runner` is what routes S2 here, keyed on `graph_state.base_ref
+    is None`, so a brownfield run (real `base_ref`) still gets the standard
+    `StageRunner` and a real analyst call. Marks the stage SKIPPED, not
+    PASSED, so it's visibly distinct in graph.json/report.md; `_is_satisfied`
+    treats SKIPPED the same as PASSED everywhere a stage's own completion is
+    checked, so S3 still becomes ready right after.
+    """
+
+    def run(self, request: StageRunRequest) -> StageRunResult:
+        context = StageContext(
+            run_id=request.run_id,
+            stage_id=request.spec.stage_id,
+            attempt=request.attempt,
+            workspace_path=request.workspace_path,
+        )
+        self._record(context, EventType.STAGE_STARTED)
+        self._record(
+            context,
+            EventType.STAGE_FINISHED,
+            {"status": StageStatus.SKIPPED.value, "reason": S2_SKIP_REASON},
+        )
+        return StageRunResult(
+            status=StageStatus.SKIPPED, response=NO_AGENT_RESPONSE, commit=None
+        )
 
 
 def _prepare_real_workspace(
@@ -1126,7 +1175,7 @@ def _record_batch_result(
                 },
             )
         )
-    elif result.status is not StageStatus.PASSED:
+    elif result.status is StageStatus.FAILED:
         _handle_stage_failure(resources, graph_state, spec, attempts, retry_limits)
     elif spec.stage_id is StageId.S6_VERIFY:
         if not _evaluate_s6_policies(resources, graph_state, policies):

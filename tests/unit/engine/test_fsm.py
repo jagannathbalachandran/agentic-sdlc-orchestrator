@@ -387,12 +387,13 @@ def test_reject_design_with_feedback_reruns_s3_onward_keeping_s1_s2(
         StageId.S8_RELEASE,
     ):
         assert rejected_state.stages[stage_id].status is StageStatus.INVALIDATED
-    for stage_id in (
-        StageId.S0_PREPARE,
-        StageId.S1_REQUIREMENTS,
-        StageId.S2_CODEBASE_ANALYSIS,
-    ):
+    for stage_id in (StageId.S0_PREPARE, StageId.S1_REQUIREMENTS):
         assert rejected_state.stages[stage_id].status is StageStatus.PASSED
+    # S2 skipped for greenfield (C4-AC3, no base_ref on this request) — still
+    # "kept", i.e. not invalidated by the Design rejection.
+    assert rejected_state.stages[StageId.S2_CODEBASE_ANALYSIS].status is (
+        StageStatus.SKIPPED
+    )
 
     events = _read_events(run_dir(tmp_path, "demo", "run-1") / "events.jsonl")
     retry_events = [e for e in events if e["event_type"] == "retry"]
@@ -528,8 +529,15 @@ def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
         request.ref, ApprovalDecision.APPROVE, "approved", "alice", 3600
     )
     assert final_state.terminal_state is RunState.COMPLETED
+    # S2 is skipped, not passed — no base_ref on this request (C4-AC3's
+    # greenfield case); every other stage genuinely passed.
+    assert final_state.stages[StageId.S2_CODEBASE_ANALYSIS].status is (
+        StageStatus.SKIPPED
+    )
     assert all(
-        result.status is StageStatus.PASSED for result in final_state.stages.values()
+        result.status is StageStatus.PASSED
+        for stage_id, result in final_state.stages.items()
+        if stage_id is not StageId.S2_CODEBASE_ANALYSIS
     )
     assert len(final_state.stages) == len(GRAPH)
 
@@ -546,17 +554,19 @@ def test_end_to_end_real_graph_reaches_completed_through_all_nine_stages(
         if isinstance(event["payload"], dict)
         and event["payload"]["gate_name"] == "schema"
     ]
-    # Two SchemaGate checks (entry + exit) per stage — except S5a, whose real
-    # per-task runner (T9.6, C10-AC2) skips gates entirely (SchemaGate's a
-    # stub anyway; not worth threading through N per-task calls).
-    assert len(schema_gate_hits) == (len(GRAPH) - 1) * 2
+    # Two SchemaGate checks (entry + exit) per stage — except S5a (its real
+    # per-task runner, T9.6/C10-AC2, skips gates entirely; SchemaGate's a
+    # stub anyway, not worth threading through N per-task calls) and S2
+    # (skipped for greenfield, C4-AC3 — its own skip runner never reaches
+    # any gate either).
+    assert len(schema_gate_hits) == (len(GRAPH) - 2) * 2
     existence_gate_hits = [
         event
         for event in gate_events
         if isinstance(event["payload"], dict)
         and event["payload"]["gate_name"] == "existence"
     ]
-    assert len(existence_gate_hits) == 1  # S2's exit gate, exercised once
+    assert len(existence_gate_hits) == 0  # S2 skipped — its exit gate never ran
 
 
 def test_s6_change_control_policy_violation_sets_pending_checkpoint(

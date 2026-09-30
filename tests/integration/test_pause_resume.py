@@ -71,8 +71,11 @@ def test_run_then_approve_across_separate_processes_proves_state_reload_at_check
 
     graph_path = orch_home / "runs" / project / run_id / "graph.json"
     statuses_after_first = _stage_statuses(graph_path)
-    for stage in ("S0", "S1", "S2", "S3"):
+    for stage in ("S0", "S1", "S3"):
         assert statuses_after_first[stage] == "passed"
+    # S2 skipped for greenfield (C4-AC3) — this run has no registered target,
+    # so base_ref is never set, same as a real greenfield run.
+    assert statuses_after_first["S2"] == "skipped"
     assert "S4" not in statuses_after_first
 
     lock_path = orch_home / "locks" / f"{project}.lock"
