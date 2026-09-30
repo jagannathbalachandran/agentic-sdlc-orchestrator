@@ -83,9 +83,7 @@ by me beforehand.
 
 **My verification:**
 - Pushed and confirmed CI green on GitHub, not only locally.
-- [TODO: if you ran the repo-wide search for leftover references
-  (shorten/fastapi/sqlalchemy/alembic/postgres/database_url), note the
-  result here; otherwise delete this line.]
+
 
 
 ## 2026-09-29 — Requirements rev 2
@@ -246,9 +244,7 @@ two code paths; later unified into a single function.
   wasn't installed in my venv (CI hides this because it installs the
   package). Fixed with `pip install -e ".[dev]"`; asked for a README note so
   graders don't hit the same issue.
-- [TODO: manual --mock run — describe what you saw (paused at Design,
-  approved from a new terminal, paused at Release, approved, completed;
-  approvals visible in approvals.jsonl), or delete this line.]
+
 
 **Review points raised and fixed (with Claude chat as second reviewer):**
 - No task was responsible for the Clarification pause, which the ambiguous
