@@ -1406,3 +1406,115 @@ exactly as found; not this task's call to make silently.
 **Covered:** C15-AC1, C15-AC2 (already satisfied by T1–T8's own tests; T9
 added no new coverage).
 
+## T9.5 — Pre-T10 integration audit (5 commits)
+
+User-directed pass, before authorizing T10's real showcase runs: "showcase
+runs MUST go through the CLI." Wire the real executor into the CLI (item 1);
+audit every built capability against the real CLI run path and wire what's
+built-but-unwired (item 2); an end-to-end CLI test proving the artifacts
+exist (item 3); confirm ORCH_HOME and per-call budget/timeout (item 4).
+
+**What five commits changed, in order:**
+1. `3ec1fe3` — S0/S6/S8 made real orchestrator-only stages
+   (`StageSpec.requires_agent`), real per-stage prompts, the S6 command gate
+   (`gates/command_gate.py`), the 8th C6 policy (`dependency_control`),
+   config-driven per-call timeout/budget, and terminal-time metrics.json/
+   report.md/pr-description.md/traceability.md generation.
+2. `008cd7b` — analyst/architect/planner/test_engineer profiles taught T8.1's
+   citation format (they predated it and would have failed their own gates).
+3. `1a90cb2` — the CLI itself: real executor by default, `--mock` opt-in,
+   run.json, executor/target persistence across approve/reject/answer.
+4. `cc22d38` — the end-to-end CLI artifact test.
+5. `54a57a5` — the missing `orchestrator rollback` command.
+
+### Integration audit table
+
+Every capability the user's item 2 named, plus everything else found while
+tracing the real CLI run path end to end. **Wired** = reachable from a real
+`orchestrator run`/`approve`/`reject`/`answer` invocation as of this pass.
+
+| Capability | Built (task) | Wired on the CLI path? |
+|---|---|---|
+| 7 (now 8) C6 policies | T6.2 (7), T9.5 (dependency_control, 8th) | **Yes** — `cli/commands/_common.py:policies_for()`, every command that calls `drive()` |
+| S6 command gate (tests + coverage ≥ 85%, D-11/AC5) | T9.5 (new — was fully unbuilt) | **Yes** — `gates/command_gate.py:TestCoverageGate`, S6's exit gate |
+| Traceability gates (S1/S3/S4 citation) | T8.1 | **Yes** (already wired T8.1) — **but the profiles that produce the cited files predated the convention and would have failed the gate on a real call**; fixed this pass (commit 2) |
+| Clarification checkpoint trigger | T7.4 | **Yes** — always active in `_record_batch_result`, no config needed |
+| Change-control checkpoint trigger | T6.2 | **Yes** — `_evaluate_s6_policies`, runs whenever `policies` is non-empty, which every CLI command now guarantees |
+| Fault-injection flag (G-16) | T7.3 | **Yes** — but not a CLI flag: scenario-config-driven (`.orchestrator/scenarios/<id>.toml`'s `inject_fault`, T5.3), resolved by `resolve_new_run_inputs` into `DriveRequest.inject_fault`. Matches G-16's own design (a property of the scenario, not an operator toggle) |
+| Bounded retries (invalid-output/S6/S7b, C9) | T7.1 | **Yes** — `ReliabilityLimits.retry_limits`, now sourced from `config/defaults.toml` (was a hardcoded fallback before this pass) |
+| Rollback (G-14) | T7.1 (`rollback_to_checkpoint`) | **Fixed this pass** — no `orchestrator rollback` command existed; added (commit 5) |
+| Per-call timeout / budget cap | T2.1 (hardcoded) | **Fixed this pass** — `Limits.per_call_timeout_seconds`/new `Limits.max_call_budget_usd` in `config/defaults.toml`, threaded through `ReliabilityLimits` into every real agent call's `timeout_seconds`/`--max-budget-usd` |
+| Parallel S5/S7 scheduler | T6.1 | **Yes** — structural (`engine/scheduler.py`'s `run_batch`), fires automatically whenever a batch has 2 ready siblings; no separate wiring needed |
+| `traceability.md` (C10-AC3) | T8.1 (generator) | **Fixed this pass** — written into the workspace at COMPLETED (`engine/fsm.py:_write_traceability`) |
+| `metrics.json` (C13-AC1) | T8.2 (generator) | **Fixed this pass** — written into the run directory at every terminal transition, whatever the outcome (`_write_metrics_json`) |
+| `report.md` | T8.2 (generator) | **Fixed this pass** — written at S8, before the Release checkpoint pause, so the approving human can read it (`_s8_commit_hook`) |
+| `pr-description.md` (C12-AC5) | T8.2 (generator) | **Fixed this pass** — same S8 commit hook |
+| Push after Release approval (C14-AC1) | **Not built at all before this pass** | **Fixed this pass** — `git_ops`-level `git push origin run/<id>`, gated on `terminal_state is COMPLETED` (`cli/commands/_common.py:push_if_completed`), which never happens without Release approval since S8's checkpoint is unconditional |
+| Real per-stage agent prompts | **Not built** — every stage got the literal string `"stage S1"` | **Fixed this pass** — `_STAGE_TASKS` + S1's own requirement-text prompt |
+| Real workspace prepare (template copy / clone at base_ref) | T5.1/T5.2 (template, target repos) | **Fixed this pass** — `workspace/manager.py`'s functions existed but were never called from `drive()`; S0's own commit hook now does the real prepare directly (couldn't reuse `manager.py` as-is — see its own docstring note on commit timing) |
+| Workspace venv creation (C3-AC3) | Deferred at T5.1 ("needed at T10") | **Fixed this pass** — S0's commit hook also creates `.venv` + `pip install -e ".[dev]"`, best-effort |
+| run.json creation (C1-AC2) | **Not built at all before this pass** | **Fixed this pass** — `cli/commands/_common.py:record_run`, called after every `drive()`/`resolve_checkpoint()`-driven state change |
+| Executor persistence across resume | N/A (real executor had no CLI path before this pass) | **Fixed this pass** — `GraphState.executor_kind`, set once, read back via `engine.fsm.load_graph_state` |
+
+### Found, flagged, deliberately **not** fixed this pass
+
+- **Flat vs. nested requirement-folder convention.** requirements.md §11
+  nests every deliverable under `docs/requirements/<REQ-id>-<slug>/`; every
+  piece of code that reads/writes these files (gates, `audit/traceability.py`,
+  every fixture, every profile) uses flat workspace-root filenames instead —
+  predates this task. Renaming now would touch dozens of already-tested files
+  for a concern orthogonal to "wire the real executor"; kept flat everywhere,
+  consistently, rather than fixing half of it. (`engine/fsm.py`'s own module
+  docstring carries this note too, for anyone reading the code directly.)
+- **Conditional S2 (§10's "stage graph with conditional S2").** Verified live
+  (greenfield end-to-end run, this pass's own manual check): S2 (codebase
+  analysis) runs unconditionally, even for a greenfield run with nothing to
+  analyze. No skip-S2-for-greenfield logic exists anywhere in `engine/graph.py`
+  or `engine/fsm.py`. Harmless today (S2's mock/real output is just generically
+  ignored downstream) but a real S2 call under the real executor would burn an
+  agent call for nothing on every greenfield run. Graph-topology-adjacent
+  change, same category as T8.1's already-documented "Join S7 doesn't exist as
+  a stage" boundary — a follow-up task, not squeezed into this one.
+- **Lint/types/security/dependency-audit as separate S6 command gates.** §7's
+  S6 row names all five; this pass's `TestCoverageGate` covers all five in
+  practice (it runs the *whole* `scripts/check.py`, not just pytest) for any
+  workspace built from the T5.1 template or either registered target repo —
+  but that's a documented reliance on convention, not five independently
+  configurable gates. Flagged, not rebuilt as five separate things: no target
+  repo in this project needs anything more granular yet.
+- **Central audit-repo publishing (C12-AC4).** Explicitly a SHOULD, not MUST;
+  no publisher exists anywhere in the codebase. `pr_description.py`'s
+  `audit_repo_url` param stays optional, unbacked.
+- **Per-task S5a commits/looping.** Still one generic call per stage (T8.1's
+  own documented limitation, reconfirmed here) — the real per-stage prompt
+  added this pass explicitly tells the agent to implement every task in one
+  call, an honest instruction matching current reality rather than the
+  developer profile's own (aspirational) "exactly one task per call" persona
+  text.
+- **`target_repo_url` as a real remote URL, not just a local path.** Every
+  actual usage in this project (T5.2's two registered projects) is a local
+  filesystem path; `Path(target_repo_url)` wrapping (used for `clone_repo`/
+  `git remote add origin`) is untested against a genuine `https://` URL on
+  Windows and may not round-trip cleanly. Not a blocker for T10 (both real
+  scenarios use local paths) but worth knowing before ever pointing this at a
+  bare GitHub URL directly.
+
+### Live verification (this pass, not part of the pytest suite)
+
+A real local target repo (registered project, `.orchestrator/scenarios/
+greenfield.toml` + `.orchestrator/project.toml`, mirroring T5.2/T5.3's real
+ones) driven through `build_new_run_request` + `drive()` with `MockExecutor`
+(so no real `claude -p` calls, matching C15-AC1, while every *orchestrator*-
+side piece — S0's real prepare, the venv, the command gate wiring — runs for
+real): confirmed the workspace was copied from `templates/python-service/`,
+`.venv` exists with a real interpreter, `scripts/check.py` is present (so
+`TestCoverageGate` will actually run something on a genuine T10.1 attempt),
+and `00-source.md` contains the scenario's real requirement text, not a
+placeholder. The full CLI round trip (register → run → approve × 2) was also
+re-run manually end to end, confirming `metrics.json`/`report.md`/
+`pr-description.md`/`traceability.md` all land in the right places with real
+content (not just under the automated E2E test).
+
+**Full gate at the end of this pass:** 272 tests, 95.84% coverage; ruff,
+mypy --strict, pip-audit all clean.
+
