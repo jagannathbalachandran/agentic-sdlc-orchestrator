@@ -18,6 +18,7 @@ rules = [
     "Every acceptance criterion (AC) in scope for this change must have at least one test.",
     "Run tests as `python -m pytest tests/acceptance` — never a `.venv`-relative interpreter path and never bare `pytest`.",
     "Only create or modify files under tests/acceptance/.",
+    "Tag every acceptance test file with the AC(s) it verifies via a '# Traces: FR-n.ACm[, FR-n.ACm...]' comment as the file's first line.",
 ]
 
 enabled_tools = ["Bash"]

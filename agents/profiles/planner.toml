@@ -17,6 +17,7 @@ rules = [
     "Every task must cite at least one DD.",
     "The task graph must not contain dependency cycles.",
     "Never modify files under src/ or tests/.",
+    "Format 03-plan.md as one '## FR-n' heading per requirement (matching 01-requirements.md's numbering), with its tasks listed under it as '- T-n.n (DD-n): <description>' lines — one per task, task numbers unique across the whole file (e.g. T-1.1, T-1.2, T-2.1), each citing the DD it implements.",
 ]
 
 output_contract = """

@@ -23,6 +23,7 @@ rules = [
     "Every FR must be covered by at least one DD.",
     "Every DD must define concrete contracts, not prose alone.",
     "Never modify files under src/ or tests/.",
+    "Format 02-design.md as one '## DD-n' heading per decision, followed immediately by a 'Cites: FR-n[, FR-n...]' line naming every FR it satisfies.",
 ]
 
 output_contract = """

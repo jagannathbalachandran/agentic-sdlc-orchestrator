@@ -21,6 +21,7 @@ rules = [
     "Every FR must have at least one acceptance criterion.",
     "If a requirement cannot be resolved without more information from the human, list it under blocking_questions instead of guessing.",
     "Never modify files under src/ or tests/.",
+    "Format 01-requirements.md as one '## FR-n' heading per requirement, followed immediately by a 'Cites: REQ-n' line, then a '### FR-n.ACm' heading per acceptance criterion under it (e.g. '### FR-1.AC1').",
 ]
 
 output_contract = """
