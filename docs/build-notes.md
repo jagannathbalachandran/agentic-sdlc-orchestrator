@@ -1371,3 +1371,38 @@ fix this task started with. Full gate: 257 tests, 97.35% coverage.
   real capability anywhere in the codebase yet; `pr_description.py`'s param
   for it is accordingly optional, not backed by a real publisher.
 
+## T9 — Coverage / gap-filling pass
+
+**What changed:** nothing — verification only. `scripts/check.py`'s pytest gate
+was already passing at 97.35% coverage (257 tests) immediately after T8.2,
+well above C15/`pyproject.toml`'s 85% `fail_under`; ruff, mypy --strict, and
+pip-audit are all green. Re-ran `pytest --cov=orchestrator --cov-report=
+term-missing` and checked every file below 100%: the lowest are
+`cli/commands/run.py` (67%) and `cli/commands/_common.py` (76%) — not an
+actual gap, just a coverage-tool artifact: `tests/integration/
+test_pause_resume.py` exercises the full CLI (`run`/`approve`/`reject`/
+`answer`/`stop`) via `subprocess.run([sys.executable, "-m",
+"orchestrator", ...])` (C15-AC1's "tests run entirely on the mock
+executor" is satisfied there too — always `--mock`), so `coverage.py`'s
+in-process instrumentation never sees those lines execute, even though
+they're genuinely covered by a real end-to-end test. No new tests added;
+nothing to fix.
+
+**Found while verifying, not fixed (flagging for the hard-stop review before
+T10):** `cli/commands/run.py` still hard-refuses anything but `--mock`
+("real executor not available yet (T4) - pass --mock", `handle()` line 51)
+even though T4.1/T4.2 (real executor + 7 agent profiles) are both long since
+built and tested (`executors/real.py`, `agents/profiles/*.toml`). No CLI
+command anywhere constructs a `RealExecutor` — `run.py`/`approve.py`/
+`reject.py`/`answer.py` all hardcode `MockExecutor(FIXTURES_ROOT)`. T10's own
+task text never says the three showcase runs must go through this CLI
+specifically ("real-executor run of the ... scenario end to end" — the how
+isn't specified), so this may be intentional (T10 might drive `RealExecutor`
+directly via a script, bypassing the CLI layer entirely) rather than a bug —
+but if the intent is to run the showcases via `orchestrator run --real
+...`, that flag doesn't exist yet and would need building first. Left
+exactly as found; not this task's call to make silently.
+
+**Covered:** C15-AC1, C15-AC2 (already satisfied by T1–T8's own tests; T9
+added no new coverage).
+
