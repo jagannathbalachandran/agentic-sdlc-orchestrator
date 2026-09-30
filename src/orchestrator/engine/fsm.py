@@ -342,6 +342,27 @@ def _write_metrics_json(ref: RunRef, event_log: EventLog) -> None:
     atomic_write_json(directory / METRICS_FILENAME, metrics_to_model(metrics))
 
 
+def _commit_task_ids(workspace: Path) -> dict[str, str]:
+    """sha -> task_id, for every commit on this branch carrying a `Task:
+    <id>` trailer (T9.10, found in real verification: `_write_traceability`
+    built `CommitInfo(sha=sha)` with no `task_id`, ever, so
+    `generate_traceability_report`'s task->commit lookup never matched
+    anything and traceability.md reported "no commit" for every FR despite
+    real, correctly-trailered per-task commits existing).
+    """
+    try:
+        log = run_git(workspace, "log", "--format=%H %(trailers:key=Task,valueonly)")
+    except GitCommandError:
+        return {}
+    result: dict[str, str] = {}
+    for line in log.splitlines():
+        parts = line.strip().split(maxsplit=1)
+        if len(parts) == 2:
+            sha, task_id = parts
+            result[sha] = task_id
+    return result
+
+
 def _write_traceability(ref: RunRef, graph_state: GraphState) -> None:
     """traceability.md (C10-AC3), written into the workspace once a run
     reaches COMPLETED — any other outcome would mostly just report gaps
@@ -363,8 +384,9 @@ def _write_traceability(ref: RunRef, graph_state: GraphState) -> None:
         if acceptance_dir.is_dir()
         else {}
     )
+    commit_task_ids = _commit_task_ids(workspace)
     commits = tuple(
-        CommitInfo(sha=sha)
+        CommitInfo(sha=sha, task_id=commit_task_ids.get(sha))
         for result in graph_state.stages.values()
         for sha in result.commits
     )
