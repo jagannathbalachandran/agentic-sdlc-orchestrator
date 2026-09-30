@@ -159,7 +159,17 @@ class StageRunner:
         self._commit_hook = commit_hook
 
     def run(self, request: StageRunRequest) -> StageRunResult:
-        """Run entry gates, the agent call, exit gates, then the commit hook."""
+        """Run entry gates, the agent call, exit gates, then the commit hook.
+
+        A gate failure still raises `StageGateFailure` (the caller —
+        `engine/scheduler.py`'s `_run_one` — is what converts it into a
+        FAILED `StageRunResult`, unchanged contract) but now also records
+        `stage_finished` first (item 3, C8-AC4-adjacent): previously a gate
+        failure skipped that event entirely, since the exception unwound
+        straight out of `run()` before reaching the event at the bottom —
+        a failed stage triggered by a gate was invisible in `stage_finished`
+        terms, diagnosable only by cross-referencing `gate_result` events.
+        """
         context = StageContext(
             run_id=request.run_id,
             stage_id=request.spec.stage_id,
@@ -167,26 +177,38 @@ class StageRunner:
             workspace_path=request.workspace_path,
         )
         self._record(context, EventType.STAGE_STARTED)
-        self._run_gates(self._gates.entry, context)
+        try:
+            self._run_gates(self._gates.entry, context)
 
-        response = (
-            self._executor.execute(
-                AgentCallRequest(
-                    profile_name=request.spec.owner_profile or "",
-                    scenario_id=request.scenario_id,
-                    stage=request.spec.stage_id.value,
-                    attempt=request.attempt,
-                    rendered_prompt=request.rendered_prompt,
-                    workspace_path=str(request.workspace_path),
-                    timeout_seconds=request.timeout_seconds,
-                    budget_usd=request.budget_usd,
+            response = (
+                self._executor.execute(
+                    AgentCallRequest(
+                        profile_name=request.spec.owner_profile or "",
+                        scenario_id=request.scenario_id,
+                        stage=request.spec.stage_id.value,
+                        attempt=request.attempt,
+                        rendered_prompt=request.rendered_prompt,
+                        workspace_path=str(request.workspace_path),
+                        timeout_seconds=request.timeout_seconds,
+                        budget_usd=request.budget_usd,
+                    )
                 )
+                if request.spec.requires_agent
+                else NO_AGENT_RESPONSE
             )
-            if request.spec.requires_agent
-            else NO_AGENT_RESPONSE
-        )
 
-        self._run_gates(self._gates.exit, context)
+            self._run_gates(self._gates.exit, context)
+        except StageGateFailure as exc:
+            self._record(
+                context,
+                EventType.STAGE_FINISHED,
+                payload={
+                    "status": StageStatus.FAILED.value,
+                    "outcome": "gate_failure",
+                    "error": str(exc),
+                },
+            )
+            raise
 
         status = (
             StageStatus.PASSED
@@ -199,7 +221,13 @@ class StageRunner:
             else None
         )
         self._record(
-            context, EventType.STAGE_FINISHED, payload={"status": status.value}
+            context,
+            EventType.STAGE_FINISHED,
+            payload={
+                "status": status.value,
+                "outcome": response.outcome.value,
+                "error": response.summary if status is StageStatus.FAILED else "",
+            },
         )
         return StageRunResult(status=status, response=response, commit=commit)
 

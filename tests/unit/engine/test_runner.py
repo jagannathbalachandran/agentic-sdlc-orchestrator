@@ -118,10 +118,21 @@ def test_stage_runner_raises_stage_gate_failure_and_never_calls_the_executor(
 
     assert not (workspace / "01-requirements.md").exists()
     events = _read_events(events_path)
-    assert [event["event_type"] for event in events] == ["stage_started", "gate_result"]
-    payload = events[-1]["payload"]
-    assert isinstance(payload, dict)
-    assert payload["passed"] is False
+    # item 3/T9.7: a gate failure now still records stage_finished (not just
+    # gate_result) — a failed stage must be diagnosable from events alone.
+    assert [event["event_type"] for event in events] == [
+        "stage_started",
+        "gate_result",
+        "stage_finished",
+    ]
+    gate_payload = events[1]["payload"]
+    assert isinstance(gate_payload, dict)
+    assert gate_payload["passed"] is False
+    finished_payload = events[2]["payload"]
+    assert isinstance(finished_payload, dict)
+    assert finished_payload["status"] == "failed"
+    assert finished_payload["outcome"] == "gate_failure"
+    assert "nope" in finished_payload["error"]
 
 
 def test_stage_runner_invokes_the_commit_hook_only_on_success(tmp_path: Path) -> None:
