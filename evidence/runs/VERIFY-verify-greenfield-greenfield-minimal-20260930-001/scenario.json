@@ -1,0 +1,7 @@
+{
+  "base_ref": null,
+  "inject_fault": false,
+  "req_id": "REQ-2",
+  "requirement_text": "Build a minimal URL shortener with two capabilities only:\n- Shorten: POST /shorten accepts a long URL and returns a short code.\n- Redirect: GET /{code} redirects to the original URL.\n",
+  "scenario_id": "greenfield-minimal"
+}

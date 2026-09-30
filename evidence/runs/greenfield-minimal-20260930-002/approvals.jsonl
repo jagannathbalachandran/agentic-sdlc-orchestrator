@@ -1,0 +1,1 @@
+{"checkpoint":"design","artifact_hashes":[],"decision":"approve","comment":"Stack explicit (Python 3.11+, Flask >=3.0,<4.0, Flask test client); DDs cite FRs; contracts cover all ACs; 302 redirect and secrets-based codes accepted. Approved.","approver":"jag","decided_at":"2026-09-30T08:13:08.515795Z"}

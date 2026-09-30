@@ -1,0 +1,41 @@
+{
+  "coverage_threshold_percent": 85,
+  "limits": {
+    "diff_size_limit_files": 15,
+    "diff_size_limit_lines": 400,
+    "max_agent_calls": 60,
+    "max_call_budget_usd": 2.0,
+    "max_run_duration_minutes": 180,
+    "per_call_timeout_seconds": 600
+  },
+  "policy": {
+    "migration_path_globs": [
+      "migrations/*",
+      "*/migrations/*",
+      "alembic/versions/*",
+      "*/alembic/versions/*"
+    ],
+    "protected_path_globs": [
+      ".github/**",
+      "scripts/check.py",
+      ".orchestrator/**",
+      "00-source.md",
+      "docs/requirements/*/00-source.md",
+      ".env*",
+      "*.pem",
+      "id_rsa*",
+      "*.key"
+    ],
+    "secret_scan_patterns": [
+      "AKIA[0-9A-Z]{16}",
+      "(?i)api[_-]?key\\s*[:=]\\s*['\"][A-Za-z0-9_\\-]{16,}['\"]",
+      "(?i)secret\\s*[:=]\\s*['\"][A-Za-z0-9_\\-]{16,}['\"]",
+      "-----BEGIN [A-Z ]*PRIVATE KEY-----"
+    ]
+  },
+  "retry_limits": {
+    "invalid_output_max_attempts": 2,
+    "s6_failure_max_attempts": 3,
+    "s7b_findings_max_attempts": 2
+  }
+}

@@ -1,0 +1,141 @@
+{
+  "run_id": "greenfield-minimal-20260930-001",
+  "scenario_id": "greenfield-minimal",
+  "stages": {
+    "S0": {
+      "stage_id": "S0",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "b052a3fc743646df83a4a75e9dfcb61f359af513"
+      ],
+      "gate_results": []
+    },
+    "S1": {
+      "stage_id": "S1",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "bfe9f4ce3fec0905625147fec5589dfadeca136e"
+      ],
+      "gate_results": []
+    },
+    "S2": {
+      "stage_id": "S2",
+      "status": "skipped",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [],
+      "gate_results": []
+    },
+    "S3": {
+      "stage_id": "S3",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "25fb7787265b4b079b60fe4565d4951f9ee2baba"
+      ],
+      "gate_results": []
+    },
+    "S4": {
+      "stage_id": "S4",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "a62b7b43e3117a4e03e4075c122cbdf6fbb20f85"
+      ],
+      "gate_results": []
+    },
+    "S5a": {
+      "stage_id": "S5a",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "65d91a7bcfea3c0be85952678883b979c9985118",
+        "ef4f06c3032f1560011a2a1e25c4d5c0834f1bad",
+        "95a5130e495ec6e56d3deeb907a89c1849c8c0b6",
+        "c2977a3b66a41150f4f513cf4eef1f70ae641337",
+        "32ada895740983ec28d1738453d9b5c4a4361832",
+        "4dd47dcff3fc8b24d3a6254601d8325e719ff66c"
+      ],
+      "gate_results": []
+    },
+    "S5b": {
+      "stage_id": "S5b",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "c11c8457cd7f5f03d88bfb8a3fb5f7bdf083567a"
+      ],
+      "gate_results": []
+    },
+    "S6": {
+      "stage_id": "S6",
+      "status": "passed",
+      "attempts": 3,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [],
+      "gate_results": []
+    },
+    "S7a": {
+      "stage_id": "S7a",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "60ad9f3b5e5a646bfc9384ee0acbd78fe55fe7b3"
+      ],
+      "gate_results": []
+    },
+    "S7b": {
+      "stage_id": "S7b",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [],
+      "gate_results": []
+    },
+    "S8": {
+      "stage_id": "S8",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [],
+      "gate_results": []
+    }
+  },
+  "pending_checkpoint": null,
+  "terminal_state": "completed",
+  "base_commit": "b052a3fc743646df83a4a75e9dfcb61f359af513",
+  "started_at": "2026-09-30T09:02:11.680039Z",
+  "last_checkpoint_commit": "60ad9f3b5e5a646bfc9384ee0acbd78fe55fe7b3",
+  "agent_call_count": 15,
+  "inject_fault": false,
+  "fault_injected": false,
+  "clarification_answer": null,
+  "target_repo_url": ".verify/target-greenfield",
+  "base_ref": null,
+  "requirement_text": "Build a minimal URL shortener with two capabilities only:\n- Shorten: POST /shorten accepts a long URL and returns a short code.\n- Redirect: GET /{code} redirects to the original URL.\n",
+  "req_id": "REQ-2",
+  "template_path": "templates\\python-service",
+  "executor_kind": "real",
+  "retry_cycle_start_attempts": {},
+  "design_rejection_feedback": null
+}

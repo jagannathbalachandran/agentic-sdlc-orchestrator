@@ -1,0 +1,24 @@
+{
+  "run_success": false,
+  "stage_first_pass_rate": 0.5,
+  "retry_count": 1,
+  "rollback_count": 0,
+  "mttr_seconds": 34.560503005981445,
+  "end_to_end_latency_seconds": 537.2940189838409,
+  "human_wait_seconds": 336.56218791007996,
+  "end_to_end_latency_excluding_human_wait_seconds": 200.731831073761,
+  "stage_latency_seconds": {
+    "S0": 46.26842999458313,
+    "S1": 84.09432792663574,
+    "S2": 0.0008661746978759766,
+    "S3": 69.88915205001831
+  },
+  "agent_call_latency_seconds": {
+    "S0:1": 46.26842999458313,
+    "S1:1": 49.53729796409607,
+    "S1:2": 34.55702996253967,
+    "S2:1": 0.0008661746978759766,
+    "S3:1": 40.424405097961426,
+    "S3:2": 29.464746952056885
+  }
+}

@@ -1,0 +1,5 @@
+{
+  "tests/acceptance/conftest.py": "93bfb48ec65bbf16e41c300dcd1e35d0076a7e3ad7f867d95ec54bed04d63fb6",
+  "tests/acceptance/test_redirect.py": "f9b90212bc4b9ba1e18e7320adaa979cd8106f9b865f62a567920ce46ab0140e",
+  "tests/acceptance/test_shorten.py": "9a81eacee324cb27ccaf5a9f79e161b7a04afa3fab68eff01e5158cb80b910a8"
+}

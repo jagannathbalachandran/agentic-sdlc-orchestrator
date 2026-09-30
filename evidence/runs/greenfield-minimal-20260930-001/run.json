@@ -1,0 +1,23 @@
+﻿{
+  "run_id": "greenfield-minimal-20260930-001",
+  "project": "shortener-greenfield-by-agents",
+  "scenario_id": "greenfield-minimal",
+  "req_id": "REQ-2",
+  "operator": "jag",
+  "state": "failed",
+  "outcome_reason": null,
+  "started_at": "2026-09-30T06:21:21.093147Z",
+  "completed_at": "2026-09-30T06:30:18.405824Z",
+  "target_url": "C:\\Users\\<user>\\projects\\shortener-greenfield-by-agents",
+  "config_commit": "2601b04765acadd1a09875c6a3a654a8b6f1c38b",
+  "base_ref": null,
+  "base_commit": "8658a9a6346cb6bf79c79aa2082976489bc5555c",
+  "run_branch": "run/greenfield-minimal-20260930-001",
+  "push_result": null,
+  "orchestrator_version": "0.1.0",
+  "template_version": null,
+  "profile_versions": {},
+  "executor_kind": "real",
+  "model": null,
+  "effective_config_hash": "474857bd4ce510254feda680101127bd5fed0b24819df00d42369fc47385fb97"
+}

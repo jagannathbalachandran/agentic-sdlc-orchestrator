@@ -1,0 +1,96 @@
+﻿{
+  "run_id": "greenfield-minimal-20260930-002",
+  "scenario_id": "greenfield-minimal",
+  "stages": {
+    "S0": {
+      "stage_id": "S0",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "bcc6a890c8dfa1a38dace65843555746ab51578f"
+      ],
+      "gate_results": []
+    },
+    "S1": {
+      "stage_id": "S1",
+      "status": "passed",
+      "attempts": 2,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "19e25bad3ac2a7f4a736093a96f5f23e763ba7df"
+      ],
+      "gate_results": []
+    },
+    "S2": {
+      "stage_id": "S2",
+      "status": "skipped",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [],
+      "gate_results": []
+    },
+    "S3": {
+      "stage_id": "S3",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "56822b787270934aae631de0e87ba5a116a7babc"
+      ],
+      "gate_results": []
+    },
+    "S4": {
+      "stage_id": "S4",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "c85ec2f2bfd6f0b9cf0dddd993e52e00e7ed174e"
+      ],
+      "gate_results": []
+    },
+    "S5a": {
+      "stage_id": "S5a",
+      "status": "failed",
+      "attempts": 2,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [],
+      "gate_results": []
+    },
+    "S5b": {
+      "stage_id": "S5b",
+      "status": "passed",
+      "attempts": 1,
+      "started_at": null,
+      "finished_at": null,
+      "commits": [
+        "f509b79069b7a157783157e7b8eebb24f6697824"
+      ],
+      "gate_results": []
+    }
+  },
+  "pending_checkpoint": null,
+  "terminal_state": "failed",
+  "base_commit": "bcc6a890c8dfa1a38dace65843555746ab51578f",
+  "started_at": "2026-09-30T08:03:17.621717Z",
+  "last_checkpoint_commit": "f509b79069b7a157783157e7b8eebb24f6697824",
+  "agent_call_count": 9,
+  "inject_fault": false,
+  "fault_injected": false,
+  "clarification_answer": null,
+  "target_repo_url": "C:\\Users\\<user>\\projects\\shortener-greenfield-by-agents",
+  "base_ref": null,
+  "requirement_text": "Build a minimal URL shortener with two capabilities only:\n- Shorten: POST /shorten accepts a long URL and returns a short code.\n- Redirect: GET /{code} redirects to the original URL.\n",
+  "req_id": "REQ-2",
+  "template_path": "templates\\python-service",
+  "executor_kind": "real",
+  "retry_cycle_start_attempts": {},
+  "design_rejection_feedback": null
+}

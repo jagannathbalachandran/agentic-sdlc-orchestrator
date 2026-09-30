@@ -1,0 +1,4 @@
+{
+  "tests/acceptance/test_redirect.py": "c0c4a4352ac42dbe0e0e4d662541c3cff6e4b1e30f13619fa694a26a61cc1c82",
+  "tests/acceptance/test_shorten.py": "89297109fe261691f76a7972a8c931dc79ad9aacbdf69158298cf4767fdc8a9a"
+}

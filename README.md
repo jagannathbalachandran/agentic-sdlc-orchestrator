@@ -10,11 +10,37 @@ everything **between** stages: order, entry/exit gates, policies, human
 approvals, retries, rollback and a tamper-evident audit trail.
 **Agents propose; humans approve and merge.**
 
-- Requirements: [`docs/requirements.md`](docs/requirements.md)
-- Architecture overview: [`docs/architecture.md`](docs/architecture.md)
-- Decision record: [`docs/adr/ADR-001-orchestrator-architecture.md`](docs/adr/ADR-001-orchestrator-architecture.md)
+- **Results and evidence of real runs:** [`evidence/runs/README.md`](evidence/runs/README.md) — start with *Start here*
 - Engineering summary (results, risks, limitations): [`docs/engineering-summary.md`](docs/engineering-summary.md)
+- Architecture overview: [`docs/architecture.md`](docs/architecture.md)
+- Requirements: [`docs/requirements.md`](docs/requirements.md)
+- Decision record: [`docs/adr/ADR-001-orchestrator-architecture.md`](docs/adr/ADR-001-orchestrator-architecture.md)
 - AI usage log: [`AI_LOG.md`](AI_LOG.md)
+
+---
+
+## Results at a glance
+
+- **A full run completed end to end with real agents** (greenfield,
+  shorten + redirect): all nine stages, real per-task commits with
+  `Task`/`FR`/`Req` trailers, S6 passing after two real fix-and-retry
+  cycles, and a generated traceability table. This was an automated
+  verification run — checkpoints approved automatically and labelled as
+  such. Browse what the agents produced:
+  [requirements](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/workspace/01-requirements.md) ·
+  [design](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/workspace/02-design.md) ·
+  [plan](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/workspace/03-plan.md) ·
+  [code](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/workspace/src) ·
+  [tests](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/workspace/tests) ·
+  [traceability](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/workspace/traceability.md) ·
+  [commits](evidence/runs/VERIFY-verify-greenfield-greenfield-minimal-20260930-001/commits-with-trailers.txt)
+- **Three human-approved real runs** (I approved or rejected at each
+  checkpoint) each exposed an integration bug the mock-based tests had
+  missed; each was diagnosed from the run record and fixed before the next
+  run. None reached Release in the time available.
+- **335 tests passing (1 skipped), 95.93% coverage**; ruff, mypy --strict and
+  pip-audit clean.
+- Brownfield and ambiguous scenarios are defined but were not run for real.
 
 ---
 
@@ -38,7 +64,8 @@ S0 Prepare → S1 Requirements ─(blocking questions?)→ [Clarification]
   global stage graph, gates, policies, agent profiles, greenfield template.
 - Each **target repo** is owned by its project team and holds only its inputs
   under `.orchestrator/`: project config and scenarios.
-- Every run works in a disposable clone of the target (the **workspace**) on a
+- Every run works in a disposable **workspace** — built from the approved
+  template (greenfield) or cloned from the target (existing code) — on a
   `run/<run-id>` branch. Nothing is ever committed to `main`.
 
 ---
@@ -67,10 +94,11 @@ A **target repo** is any Git repo the orchestrator works on. It only needs:
 - **Existing (brownfield) target:** a repo with existing code; scenarios name a
   `base_ref` (tag or commit) the run starts from.
 
-The orchestrator never edits the target's `main`. It clones the target into a
-disposable **workspace**, works on a `run/<run-id>` branch, and pushes that
-branch after Release approval. Project teams never modify the orchestrator;
-they only add scenarios to their own repo.
+The orchestrator never edits the target's `main`. It prepares a disposable
+**workspace** (from the template, or a clone of the target), works on a
+`run/<run-id>` branch, and pushes that branch after Release approval. Project
+teams never modify the orchestrator; they only add scenarios to their own
+repo.
 
 ---
 
@@ -135,7 +163,7 @@ The orchestrator keeps its runtime data in `ORCH_HOME`, default
 ```
 ~/.orchestrator/
 ├── projects.json                         # registry: project name → repo location
-├── workspaces/<project>/<run-id>/        # the run's working clone (agents write here)
+├── workspaces/<project>/<run-id>/        # the run's workspace (agents write here)
 └── runs/<project>/<run-id>/              # the run record (orchestrator only)
 ```
 
@@ -247,7 +275,8 @@ $rec = "$env:USERPROFILE\.orchestrator\runs\<project-name>\$runId"
 Get-Content "$rec\events.jsonl" -Wait -Tail 5
 
 # Status of every stage
-(Get-Content "$rec\graph.json" | ConvertFrom-Json).stages
+$g = (Get-Content "$rec\graph.json" | ConvertFrom-Json).stages
+$g.PSObject.Properties | ForEach-Object { $_.Value } | Select-Object stage_id, status, attempts | Format-Table
 
 # Where the run is paused
 Get-Content "$rec\graph.json" | ConvertFrom-Json | Select-Object terminal_state, pending_checkpoint
@@ -349,8 +378,8 @@ Get-ChildItem "$env:USERPROFILE\.orchestrator\runs\<project-name>" -Directory | 
 | Metric | Meaning |
 |---|---|
 | `run_success` | Whether the run completed (true), failed or stopped (false), or is still in progress (null) |
-| `stage_first_pass_rate` | Share of stages that passed on their first attempt |
-| `retry_count`, `rollback_count` | Retries and rollbacks during the run |
+| `stage_first_pass_rate` | Share of stages that passed on their first attempt (skipped stages excluded) |
+| `retry_count`, `rollback_count` | Retries (including re-plans after a human rejection) and rollbacks during the run |
 | `mttr_seconds` | Mean time from a stage failing to that stage next succeeding |
 | `end_to_end_latency_seconds` | Total wall-clock time of the run |
 | `human_wait_seconds` | Time spent waiting at approval checkpoints |
@@ -403,8 +432,14 @@ git log -1 --format="%(trailers)" <commit>         # Task / FR / Req
 | Brownfield | `url-shortener-brownfield-target` (copy of Assignment 1) | `brownfield` | Baseline check, codebase analysis, migration → change-control approval, injected failure and fix |
 | Ambiguous | `url-shortener-brownfield-target` | `ambiguous` | Blocking questions → clarification; design rejection → re-plan |
 
-Recorded runs are in [`evidence/runs/`](evidence/runs/); outcomes are in the
-[engineering summary](docs/engineering-summary.md).
+**Status at submission:** three human-approved real greenfield runs
+(`greenfield-minimal-20260930-001` to `-003`) each exposed an integration bug
+that the mock-based tests had not; each was diagnosed from the run record and
+fixed. After those fixes, an automated verification run with real agents
+(approvals automated and labelled) completed end to end. Brownfield and
+ambiguous scenarios are defined but were not run for real in the time
+available. Full account and browsable outputs:
+[`evidence/runs/README.md`](evidence/runs/README.md).
 
 ---
 
@@ -420,11 +455,16 @@ Recorded runs are in [`evidence/runs/`](evidence/runs/); outcomes are in the
 - **Quality gate** (`scripts/check.py`, also run in CI): ruff, ruff format,
   mypy --strict, pytest with coverage ≥ 85%, pip-audit.
 - **Real runs** are the final integration check (not part of the automated
-  suite, since they need Claude and cost money).
+  suite, since they need Claude and cost money). They found issues the
+  automated suite could not — see [`evidence/runs/README.md`](evidence/runs/README.md).
 
 ---
 
 ## 10. Limitations
+
+No human-approved real run reached Release in the time available; the full
+flow was completed by an automated verification run with real agents (see
+[Results at a glance](#results-at-a-glance)).
 
 See section 8 of the [engineering summary](docs/engineering-summary.md) and
 `docs/architecture-proposal.md` §4.3. Main ones: re-planning after

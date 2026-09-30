@@ -1,0 +1,21 @@
+{
+  "agent_call_id": "S1-1",
+  "run_id": "greenfield-minimal-20260930-002",
+  "stage": "S1",
+  "attempt": 1,
+  "task_id": null,
+  "role": "analyst",
+  "profile_version_hash": "31762a003dfd6ae9606cfbd21196d8443b4bb43ab5bcf011aaf509679f7f5b9b",
+  "prompt": "Requirement REQ-2: Build a minimal URL shortener with two capabilities only:\n- Shorten: POST /shorten accepts a long URL and returns a short code.\n- Redirect: GET /{code} redirects to the original URL.\n",
+  "response": {
+    "outcome": "invalid_output",
+    "summary": "",
+    "produced_ids": [],
+    "files_written": [],
+    "high_severity_findings": [],
+    "blocking_questions": [],
+    "duration_seconds": 42.15,
+    "cost_usd": 0.1657218,
+    "session_id": "88511bed-0c3d-4c1d-9b51-70a02754ccb1"
+  }
+}
