@@ -13,6 +13,7 @@ approvals, retries, rollback and a tamper-evident audit trail.
 - **Results and evidence of real runs:** [`evidence/runs/README.md`](evidence/runs/README.md) — start with *Start here*
 - Engineering summary (results, risks, limitations): [`docs/engineering-summary.md`](docs/engineering-summary.md)
 - Architecture overview: [`docs/architecture.md`](docs/architecture.md)
+- Module/class reference, flow diagrams and a line-by-line E2E walkthrough: [`docs/internals.md`](docs/internals.md)
 - Requirements: [`docs/requirements.md`](docs/requirements.md)
 - Decision record: [`docs/adr/ADR-001-orchestrator-architecture.md`](docs/adr/ADR-001-orchestrator-architecture.md)
 - AI usage log: [`AI_LOG.md`](AI_LOG.md)
